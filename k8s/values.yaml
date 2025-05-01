@@ -1,0 +1,128 @@
+# Main environment configuration
+namespace: buildandburn
+ingress:
+  domain: buildandburn.local
+
+# Service definitions
+services:
+  - name: backend-service
+    image: ${backend_image}
+    replicas: 1
+    ports:
+      - name: http
+        containerPort: 8080
+    service:
+      type: ClusterIP
+      ports:
+        - name: http
+          port: 80
+          targetPort: 8080
+    env:
+      - name: DB_HOST
+        value: "${db_host}"
+      - name: DB_PORT
+        value: "${db_port}"
+      - name: DB_NAME
+        value: "${db_name}"
+      - name: DB_USER
+        valueFrom:
+          secretKeyRef:
+            name: db-credentials
+            key: username
+      - name: DB_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: db-credentials
+            key: password
+      - name: RABBITMQ_HOST
+        value: "${mq_host}"
+      - name: RABBITMQ_PORT
+        value: "${mq_port}"
+      - name: RABBITMQ_USER
+        valueFrom:
+          secretKeyRef:
+            name: mq-credentials
+            key: username
+      - name: RABBITMQ_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: mq-credentials
+            key: password
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    ingress:
+      enabled: true
+      className: nginx
+      host: api.buildandburn.local
+      path: /
+      pathType: Prefix
+      annotations:
+        nginx.ingress.kubernetes.io/rewrite-target: /
+
+  - name: frontend-service
+    image: ${frontend_image}
+    replicas: 1
+    ports:
+      - name: http
+        containerPort: 3000
+    service:
+      type: ClusterIP
+      ports:
+        - name: http
+          port: 80
+          targetPort: 3000
+    env:
+      - name: API_URL
+        value: "http://backend-service"
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    ingress:
+      enabled: true
+      className: nginx
+      host: buildandburn.local
+      path: /
+      pathType: Prefix
+      annotations:
+        nginx.ingress.kubernetes.io/rewrite-target: /
+
+# Local database definition (for development only)
+database:
+  name: postgres-db
+  image: postgres:13
+  postgresUser: postgres
+  postgresPassword: ${postgres_password}
+  user: bbadmin
+  password: ${db_password}
+  storage: 1Gi
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# Local message queue definition (for development only)
+queue:
+  name: rabbitmq
+  image: rabbitmq:3.9-management
+  user: bbadmin
+  password: ${mq_password}
+  storage: 1Gi
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi" 

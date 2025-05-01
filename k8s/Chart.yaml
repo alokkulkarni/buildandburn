@@ -1,0 +1,13 @@
+apiVersion: v2
+name: buildandburn
+description: A Helm chart for Build and Burn environments
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - buildandburn
+  - development
+  - testing
+maintainers:
+  - name: Build and Burn Team
+    email: support@buildandburn.dev 

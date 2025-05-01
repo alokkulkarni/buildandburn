@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.name }}-init
+  namespace: {{ .Values.namespace }}
+data:
+  init.sql: |
+    CREATE DATABASE {{ .Values.database.name }};
+    CREATE USER {{ .Values.database.user }} WITH PASSWORD '{{ .Values.database.password }}';
+    GRANT ALL PRIVILEGES ON DATABASE {{ .Values.database.name }} TO {{ .Values.database.user }};
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Values.name }}-auth
+  namespace: {{ .Values.namespace }}
+type: Opaque
+data:
+  POSTGRES_PASSWORD: {{ .Values.database.postgresPassword | b64enc }}
+  POSTGRES_USER: {{ .Values.database.postgresUser | b64enc | default "postgres" }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.name }}-data
+  namespace: {{ .Values.namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.database.storage | default "1Gi" }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Values.name }}
+spec:
+  serviceName: {{ .Values.name }}
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Values.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.name }}
+    spec:
+      containers:
+      - name: {{ .Values.name }}
+        image: {{ .Values.database.image | default "postgres:13" }}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.name }}-auth
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.name }}-auth
+              key: POSTGRES_USER
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        - name: init-scripts
+          mountPath: /docker-entrypoint-initdb.d
+        resources:
+          requests:
+            cpu: {{ .Values.database.resources.requests.cpu | default "100m" }}
+            memory: {{ .Values.database.resources.requests.memory | default "256Mi" }}
+          limits:
+            cpu: {{ .Values.database.resources.limits.cpu | default "500m" }}
+            memory: {{ .Values.database.resources.limits.memory | default "512Mi" }}
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: {{ .Values.name }}-data
+      - name: init-scripts
+        configMap:
+          name: {{ .Values.name }}-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Values.name }}
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  selector:
+    app: {{ .Values.name }} 

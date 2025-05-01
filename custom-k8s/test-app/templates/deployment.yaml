@@ -1,0 +1,41 @@
+{{- if .Values.nginx.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-nginx
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "test-app.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.nginx.replicas }}
+  selector:
+    matchLabels:
+      {{- include "test-app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "test-app.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: nginx
+          image: {{ .Values.nginx.image }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.nginx.port }}
+              protocol: TCP
+          {{- if .Values.nginx.resources }}
+          resources:
+            {{- toYaml .Values.nginx.resources | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: nginx-html
+              mountPath: /usr/share/nginx/html/index.html
+              subPath: index.html
+      volumes:
+        - name: nginx-html
+          configMap:
+            name: {{ .Release.Name }}-nginx-config
+            items:
+              - key: index.html
+                path: index.html
+{{- end }} 

@@ -1,0 +1,25 @@
+{{- if and .Values.nginx.enabled .Values.nginx.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-nginx
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "test-app.labels" . | nindent 4 }}
+  {{- with .Values.nginx.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  rules:
+    - host: {{ .Values.nginx.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-nginx
+                port:
+                  number: {{ .Values.nginx.service.port }}
+{{- end }} 

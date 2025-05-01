@@ -1,0 +1,155 @@
+---
+# Build and Burn Sample Manifest
+# This is an example configuration for deploying a simple web application
+
+name: sample-app
+description: "Sample application for Build and Burn"
+
+# Infrastructure configuration
+infrastructure:
+  provider: aws  # Supported: aws, azure, gcp
+  region: us-west-2
+  vpc:
+    cidr: "10.0.0.0/16"
+  subnets:
+    - cidr: "10.0.1.0/24"
+      az: "us-west-2a"
+    - cidr: "10.0.2.0/24"
+      az: "us-west-2b"
+  
+  # Kubernetes cluster configuration
+  kubernetes:
+    version: "1.25"
+    node_type: "t3.medium"
+    node_count: 2
+  
+  # Optional: Database configuration
+  database:
+    enabled: true
+    engine: postgres
+    version: "14.6"
+    instance_type: "db.t3.micro"
+    storage_gb: 20
+  
+  # Optional: Message queue configuration
+  message_queue:
+    enabled: false
+    engine: rabbitmq
+    version: "3.10"
+    instance_type: "t3.micro"
+
+# Ingress configuration
+ingress:
+  domain: "example.com"  # Base domain for ingress rules
+  tls:
+    enabled: true
+
+# Application services
+services:
+  - name: frontend
+    image: "nginx:alpine"
+    replicas: 2
+    ports:
+      - containerPort: 80
+        port: 80
+        protocol: TCP
+    resources:
+      limits:
+        cpu: "200m"
+        memory: "256Mi"
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+    ingress:
+      enabled: true
+      path: "/"
+      host: "frontend.example.com"
+    dependencies:
+      - backend
+    env:
+      - name: API_URL
+        value: "http://backend.bb-sample-app.svc.cluster.local"
+
+  - name: backend
+    image: "python:3.9-alpine"
+    command: ["python", "-m", "http.server", "8080"]
+    replicas: 2
+    ports:
+      - containerPort: 8080
+        port: 80
+    resources:
+      limits:
+        cpu: "300m"
+        memory: "512Mi"
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+    service:
+      type: ClusterIP
+      ports:
+        - port: 80
+          targetPort: 8080
+    dependencies:
+      - database
+    config:
+      app.properties: |
+        log.level=INFO
+        app.environment=development
+    secrets:
+      API_KEY: "your-api-key-here"
+    persistence:
+      enabled: true
+      size: "1Gi"
+      mountPath: "/data"
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: 8080
+      initialDelaySeconds: 30
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /ready
+        port: 8080
+      initialDelaySeconds: 5
+      periodSeconds: 5
+
+  - name: database
+    image: "postgres:14-alpine"
+    ports:
+      - containerPort: 5432
+        port: 5432
+    env:
+      - name: POSTGRES_DB
+        value: "app"
+      - name: POSTGRES_USER
+        value: "postgres"
+      - name: POSTGRES_PASSWORD
+        value: "postgres"
+    service:
+      type: ClusterIP
+      ports:
+        - port: 5432
+          targetPort: 5432
+    persistence:
+      enabled: true
+      size: "5Gi"
+      mountPath: "/var/lib/postgresql/data"
+      subPath: "postgres"
+
+# Optional: Custom Kubernetes resources path
+# If you have existing Helm charts or Kubernetes manifests, you can specify the path here
+# k8s_path: "./my-custom-k8s-files"
+
+# Optional: Monitoring configuration
+monitoring:
+  enabled: true
+  prometheus: true
+  grafana: true
+
+# Optional: Logging configuration
+logging:
+  enabled: true
+  elasticsearch: false
+  kibana: false
+  fluentd: true 

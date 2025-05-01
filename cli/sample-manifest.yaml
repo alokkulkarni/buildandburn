@@ -1,0 +1,60 @@
+name: test-app
+region: eu-west-2
+
+# Custom k8s path
+k8s_path: "./custom-k8s/test-app"
+
+# Services to deploy
+services:
+  - name: nginx
+    image: nginx:alpine
+    port: 80
+    replicas: 1
+    expose: true
+    configMapData:
+      index.html: |
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Build and Burn Test App</title>
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              margin: 40px;
+              text-align: center;
+            }
+            h1 {
+              color: #333;
+            }
+            .container {
+              max-width: 800px;
+              margin: 0 auto;
+              padding: 20px;
+              border: 1px solid #ddd;
+              border-radius: 5px;
+              background-color: #f9f9f9;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>Build and Burn Test App</h1>
+            <p>This is a simple test application deployed using the Build and Burn CLI.</p>
+            <p>Environment created at: <span id="timestamp"></span></p>
+            <script>
+              document.getElementById('timestamp').textContent = new Date().toLocaleString();
+            </script>
+          </div>
+        </body>
+        </html>
+    volumeMounts:
+      - name: nginx-html
+        mountPath: /usr/share/nginx/html/index.html
+        subPath: index.html
+    volumes:
+      - name: nginx-html
+        configMap:
+          name: nginx-config
+          items:
+            - key: index.html
+              path: index.html 

@@ -1,0 +1,152 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.name }}-config
+  namespace: {{ .Values.namespace }}
+data:
+{{- if .Values.configMapData }}
+{{ toYaml .Values.configMapData | indent 2 }}
+{{- end }}
+---
+{{- if .Values.secrets }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Values.name }}-secrets
+  namespace: {{ .Values.namespace }}
+type: Opaque
+data:
+{{ toYaml .Values.secrets | indent 2 }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Values.name }}
+spec:
+  replicas: {{ .Values.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app: {{ .Values.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.name }}
+    spec:
+      serviceAccountName: {{ .Values.name }}
+      containers:
+      - name: {{ .Values.name }}
+        image: {{ .Values.image }}
+        imagePullPolicy: Always
+        ports:
+        {{- range .Values.ports }}
+        - containerPort: {{ .containerPort }}
+          name: {{ .name }}
+        {{- end }}
+        env:
+        {{- range .Values.env }}
+        - name: {{ .name }}
+          {{- if .value }}
+          value: "{{ .value }}"
+          {{- else if .valueFrom }}
+          valueFrom:
+            {{- if .valueFrom.secretKeyRef }}
+            secretKeyRef:
+              name: {{ .valueFrom.secretKeyRef.name }}
+              key: {{ .valueFrom.secretKeyRef.key }}
+            {{- else if .valueFrom.configMapKeyRef }}
+            configMapKeyRef:
+              name: {{ .valueFrom.configMapKeyRef.name }}
+              key: {{ .valueFrom.configMapKeyRef.key }}
+            {{- end }}
+          {{- end }}
+        {{- end }}
+        resources:
+          requests:
+            cpu: {{ .Values.resources.requests.cpu | default "100m" }}
+            memory: {{ .Values.resources.requests.memory | default "128Mi" }}
+          limits:
+            cpu: {{ .Values.resources.limits.cpu | default "500m" }}
+            memory: {{ .Values.resources.limits.memory | default "512Mi" }}
+        {{- if .Values.livenessProbe }}
+        livenessProbe:
+{{ toYaml .Values.livenessProbe | indent 10 }}
+        {{- end }}
+        {{- if .Values.readinessProbe }}
+        readinessProbe:
+{{ toYaml .Values.readinessProbe | indent 10 }}
+        {{- end }}
+        {{- if .Values.volumeMounts }}
+        volumeMounts:
+{{ toYaml .Values.volumeMounts | indent 10 }}
+        {{- end }}
+      {{- if .Values.volumes }}
+      volumes:
+{{ toYaml .Values.volumes | indent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Values.name }}
+spec:
+  type: {{ .Values.service.type | default "ClusterIP" }}
+  ports:
+  {{- range .Values.service.ports }}
+  - port: {{ .port }}
+    targetPort: {{ .targetPort }}
+    name: {{ .name }}
+    {{- if eq $.Values.service.type "NodePort" }}
+    nodePort: {{ .nodePort }}
+    {{- end }}
+  {{- end }}
+  selector:
+    app: {{ .Values.name }}
+---
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Values.namespace }}
+  annotations:
+    {{- range $key, $value := .Values.ingress.annotations }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+  - host: {{ .Values.ingress.host }}
+    http:
+      paths:
+      - path: {{ .Values.ingress.path | default "/" }}
+        pathType: {{ .Values.ingress.pathType | default "Prefix" }}
+        backend:
+          service:
+            name: {{ .Values.name }}
+            port:
+              number: {{ index .Values.service.ports 0 "port" }}
+  {{- if .Values.ingress.tls }}
+  tls:
+  - hosts:
+    - {{ .Values.ingress.host }}
+    secretName: {{ .Values.ingress.tlsSecret }}
+  {{- end }}
+{{- end }} 

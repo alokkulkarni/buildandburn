@@ -1,0 +1,53 @@
+name: test-app
+version: 1.0.0
+region: us-west-2
+
+dependencies:
+  - type: database
+    provider: postgres
+    version: "13"
+    instance_class: db.t3.small
+    storage: 20
+  - type: queue
+    provider: RabbitMQ
+    version: "3.9.16"
+    instance_class: mq.t3.micro
+
+services:
+  - name: frontend
+    image: nginx:latest
+    port: 80
+    replicas: 2
+    env:
+      - name: BACKEND_URL
+        value: "http://backend:8080"
+  - name: backend
+    image: python:3.9
+    port: 8080
+    replicas: 2
+    command: ["python", "-m", "http.server", "8080"]
+    env:
+      - name: DATABASE_HOST
+        value: ${database.host}
+      - name: DATABASE_PORT
+        value: ${database.port}
+      - name: DATABASE_NAME
+        value: app
+      - name: DATABASE_USER
+        value: postgres
+      - name: DATABASE_PASSWORD
+        value: password
+      - name: QUEUE_HOST
+        value: ${queue.host}
+      - name: QUEUE_PORT
+        value: ${queue.port}
+      - name: QUEUE_USER
+        value: guest
+      - name: QUEUE_PASSWORD
+        value: guest
+
+ingress:
+  - service: frontend
+    port: 80
+    path: /
+    host: app.example.com 

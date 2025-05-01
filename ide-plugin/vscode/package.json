@@ -1,0 +1,63 @@
+{
+  "name": "buildandburn",
+  "displayName": "Build and Burn Environments",
+  "description": "Create and manage build-and-burn environments for development and testing",
+  "version": "0.1.0",
+  "publisher": "platform-engineering",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:buildandburn.createEnvironment",
+    "onCommand:buildandburn.destroyEnvironment",
+    "onCommand:buildandburn.getEnvironmentInfo",
+    "onCommand:buildandburn.createManifest"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "buildandburn.createEnvironment",
+        "title": "Build and Burn: Create Environment"
+      },
+      {
+        "command": "buildandburn.destroyEnvironment",
+        "title": "Build and Burn: Destroy Environment"
+      },
+      {
+        "command": "buildandburn.getEnvironmentInfo",
+        "title": "Build and Burn: Get Environment Info"
+      },
+      {
+        "command": "buildandburn.createManifest",
+        "title": "Build and Burn: Create Manifest File"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "when": "resourceExtname == .yaml || resourceExtname == .yml",
+          "command": "buildandburn.createEnvironment",
+          "group": "buildandburn"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.60.0",
+    "@types/node": "16.x",
+    "eslint": "^8.16.0",
+    "vsce": "^2.9.2"
+  }
+} 

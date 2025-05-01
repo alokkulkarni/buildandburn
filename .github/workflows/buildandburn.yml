@@ -1,0 +1,86 @@
+name: Build and Burn Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'up'
+        type: choice
+        options:
+          - up
+          - down
+          - info
+      manifest_path:
+        description: 'Path to manifest file'
+        required: false
+        default: 'manifest.yaml'
+        type: string
+      env_id:
+        description: 'Environment ID (required for down/info actions)'
+        required: false
+        type: string
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_REGION: ${{ secrets.AWS_REGION || 'us-west-2' }}
+
+jobs:
+  buildandburn:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e cli/
+          pip install awscli kubernetes-helm
+          
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.3.7
+          
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.24.0'
+          
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Create environment
+        if: ${{ github.event.inputs.action == 'up' }}
+        run: |
+          buildandburn up --manifest ${{ github.event.inputs.manifest_path }}
+        
+      - name: Destroy environment
+        if: ${{ github.event.inputs.action == 'down' }}
+        run: |
+          if [ -z "${{ github.event.inputs.env_id }}" ]; then
+            echo "Error: env_id is required for down action"
+            exit 1
+          fi
+          buildandburn down --env-id ${{ github.event.inputs.env_id }} --force
+          
+      - name: Get environment info
+        if: ${{ github.event.inputs.action == 'info' }}
+        run: |
+          if [ -z "${{ github.event.inputs.env_id }}" ]; then
+            echo "Error: env_id is required for info action"
+            exit 1
+          fi
+          buildandburn info --env-id ${{ github.event.inputs.env_id }} 

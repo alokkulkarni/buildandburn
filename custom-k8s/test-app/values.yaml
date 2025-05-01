@@ -1,0 +1,63 @@
+# Default values for test-app
+# This is a YAML-formatted file.
+
+global:
+  namespace: bb-test-app
+
+# Nginx configuration
+nginx:
+  enabled: true
+  replicas: 1
+  image: nginx:alpine
+  port: 80
+  service:
+    type: LoadBalancer
+    port: 80
+  ingress:
+    enabled: true
+    annotations:
+      kubernetes.io/ingress.class: nginx
+    host: nginx.example.com
+  resources:
+    limits:
+      cpu: 100m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  configMapData:
+    index.html: |
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Build and Burn Test App</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            margin: 40px;
+            text-align: center;
+          }
+          h1 {
+            color: #333;
+          }
+          .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>Build and Burn Test App</h1>
+          <p>This is a simple test application deployed using the Build and Burn CLI.</p>
+          <p>Environment created at: <span id="timestamp"></span></p>
+          <script>
+            document.getElementById('timestamp').textContent = new Date().toLocaleString();
+          </script>
+        </div>
+      </body>
+      </html> 

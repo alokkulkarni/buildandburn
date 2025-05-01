@@ -1,0 +1,13 @@
+{{- if .Values.nginx.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-nginx-config
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "test-app.labels" . | nindent 4 }}
+data:
+  {{- with .Values.nginx.configMapData }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }} 

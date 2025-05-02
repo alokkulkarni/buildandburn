@@ -18,7 +18,7 @@ terraform {
       version = "~> 2.5"
     }
   }
-  
+
   # Use local state instead of S3
   backend "local" {}
 }
@@ -39,7 +39,7 @@ locals {
 
 module "vpc" {
   source = "./modules/vpc"
-  
+
   project_name = local.project_name
   env_id       = local.env_id
   cidr_block   = var.vpc_cidr
@@ -49,7 +49,7 @@ module "vpc" {
 
 module "eks" {
   source = "./modules/eks"
-  
+
   project_name   = local.project_name
   env_id         = local.env_id
   vpc_id         = module.vpc.vpc_id
@@ -59,7 +59,7 @@ module "eks" {
   node_max       = var.eks_node_max
   k8s_version    = var.k8s_version
   tags           = local.tags
-  
+
   depends_on = [module.vpc]
 }
 
@@ -67,18 +67,18 @@ module "eks" {
 module "rds" {
   source = "./modules/rds"
   count  = contains(var.dependencies, "database") ? 1 : 0
-  
-  project_name      = local.project_name
-  env_id            = local.env_id
-  vpc_id            = module.vpc.vpc_id
-  subnet_ids        = module.vpc.database_subnet_ids
+
+  project_name          = local.project_name
+  env_id                = local.env_id
+  vpc_id                = module.vpc.vpc_id
+  subnet_ids            = module.vpc.database_subnet_ids
   eks_security_group_id = module.eks.cluster_security_group_id
-  engine            = var.db_engine
-  engine_version    = var.db_engine_version
-  instance_class    = var.db_instance_class
-  allocated_storage = var.db_allocated_storage
-  tags              = local.tags
-  
+  engine                = var.db_engine
+  engine_version        = var.db_engine_version
+  instance_class        = var.db_instance_class
+  allocated_storage     = var.db_allocated_storage
+  tags                  = local.tags
+
   depends_on = [module.vpc]
 }
 
@@ -86,17 +86,17 @@ module "rds" {
 module "mq" {
   source = "./modules/mq"
   count  = contains(var.dependencies, "queue") ? 1 : 0
-  
-  project_name        = local.project_name
-  env_id              = local.env_id
-  vpc_id              = module.vpc.vpc_id
-  subnet_ids          = module.vpc.private_subnet_ids
+
+  project_name          = local.project_name
+  env_id                = local.env_id
+  vpc_id                = module.vpc.vpc_id
+  subnet_ids            = module.vpc.private_subnet_ids
   eks_security_group_id = module.eks.cluster_security_group_id
-  engine_type         = var.mq_engine_type
-  engine_version      = var.mq_engine_version
-  instance_type       = var.mq_instance_type
-  tags                = local.tags
-  
+  engine_type           = var.mq_engine_type
+  engine_version        = var.mq_engine_version
+  instance_type         = var.mq_instance_type
+  tags                  = local.tags
+
   depends_on = [module.vpc]
 }
 
@@ -104,26 +104,49 @@ module "mq" {
 module "elasticache" {
   source = "./modules/elasticache"
   count  = contains(var.dependencies, "redis") ? 1 : 0
-  
-  project_name        = local.project_name
-  env_id              = local.env_id
-  vpc_id              = module.vpc.vpc_id
-  subnet_ids          = module.vpc.private_subnet_ids
+
+  project_name          = local.project_name
+  env_id                = local.env_id
+  vpc_id                = module.vpc.vpc_id
+  subnet_ids            = module.vpc.private_subnet_ids
   eks_security_group_id = module.eks.cluster_security_group_id
-  
+
   # Redis configuration
-  node_type           = var.redis_node_type
-  engine_version      = var.redis_engine_version
-  cluster_size        = var.redis_cluster_size
-  auth_enabled        = var.redis_auth_enabled
-  
+  node_type      = var.redis_node_type
+  engine_version = var.redis_engine_version
+  cluster_size   = var.redis_cluster_size
+  auth_enabled   = var.redis_auth_enabled
+
   # Advanced configuration
   at_rest_encryption_enabled = true
   transit_encryption_enabled = true
-  multi_az_enabled          = var.redis_multi_az_enabled
-  
-  tags                = local.tags
-  
+  multi_az_enabled           = var.redis_multi_az_enabled
+
+  tags = local.tags
+
+  depends_on = [module.vpc]
+}
+
+# Conditionally create Kafka if kafka is requested
+module "kafka" {
+  source = "./modules/kafka"
+  count  = contains(var.dependencies, "kafka") ? 1 : 0
+
+  project_name          = local.project_name
+  env_id                = local.env_id
+  vpc_id                = module.vpc.vpc_id
+  subnet_ids            = module.vpc.private_subnet_ids
+  eks_security_group_id = module.eks.cluster_security_group_id
+
+  # Kafka configuration
+  kafka_version    = var.kafka_version
+  instance_type    = var.kafka_instance_type
+  broker_count     = var.kafka_broker_count
+  volume_size      = var.kafka_volume_size
+  monitoring_level = var.kafka_monitoring_level
+
+  tags = local.tags
+
   depends_on = [module.vpc]
 }
 
@@ -131,14 +154,14 @@ module "elasticache" {
 module "eks_to_rds_policy" {
   source = "./modules/eks-to-rds-policy"
   count  = contains(var.dependencies, "database") ? 1 : 0
-  
+
   project_name   = local.project_name
   env_id         = local.env_id
   region         = var.region
   account_id     = local.account_id
   node_role_name = module.eks.node_role_name
   tags           = local.tags
-  
+
   depends_on = [module.eks, module.rds]
 }
 
@@ -146,14 +169,14 @@ module "eks_to_rds_policy" {
 module "eks_to_mq_policy" {
   source = "./modules/eks-to-mq-policy"
   count  = contains(var.dependencies, "queue") ? 1 : 0
-  
+
   project_name   = local.project_name
   env_id         = local.env_id
   region         = var.region
   account_id     = local.account_id
   node_role_name = module.eks.node_role_name
   tags           = local.tags
-  
+
   depends_on = [module.eks, module.mq]
 }
 
@@ -161,15 +184,60 @@ module "eks_to_mq_policy" {
 module "eks_to_elasticache_policy" {
   source = "./modules/eks-to-elasticache-policy"
   count  = contains(var.dependencies, "redis") ? 1 : 0
-  
+
   project_name   = local.project_name
   env_id         = local.env_id
   region         = var.region
   account_id     = local.account_id
   node_role_name = module.eks.node_role_name
   tags           = local.tags
-  
+
   depends_on = [module.eks, module.elasticache]
+}
+
+# Conditionally create EKS to Kafka policy if kafka is requested
+module "eks_to_kafka_policy" {
+  source = "./modules/eks-to-kafka-policy"
+  count  = contains(var.dependencies, "kafka") ? 1 : 0
+
+  project_name   = local.project_name
+  env_id         = local.env_id
+  region         = var.region
+  account_id     = local.account_id
+  node_role_name = module.eks.node_role_name
+  tags           = local.tags
+
+  depends_on = [module.eks, module.kafka]
+}
+
+# Conditionally create Kafka full access policy if kafka is requested
+module "kafka_full_access_policy" {
+  source = "./modules/kafka-full-access-policy"
+  count  = contains(var.dependencies, "kafka") ? 1 : 0
+
+  project_name   = local.project_name
+  env_id         = local.env_id
+  region         = var.region
+  account_id     = local.account_id
+  node_role_name = module.eks.node_role_name
+  tags           = local.tags
+
+  depends_on = [module.eks, module.kafka]
+}
+
+# Conditionally create Kafka write access policy
+module "kafka_write_access_policy" {
+  source = "./modules/kafka-write-access-policy"
+  count  = contains(var.dependencies, "kafka") ? 0 : 0 # Default disabled, enable as needed
+
+  project_name   = local.project_name
+  env_id         = local.env_id
+  region         = var.region
+  account_id     = local.account_id
+  node_role_name = module.eks.node_role_name
+  tags           = local.tags
+
+  depends_on = [module.eks, module.kafka]
 }
 
 # Configure kubernetes provider with EKS details

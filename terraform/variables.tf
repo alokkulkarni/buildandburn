@@ -41,7 +41,7 @@ variable "eks_node_max" {
 variable "k8s_version" {
   description = "Kubernetes version to use"
   type        = string
-  default     = "1.24"
+  default     = "1.32"
 }
 
 variable "dependencies" {
@@ -83,13 +83,44 @@ variable "mq_engine_type" {
 variable "mq_engine_version" {
   description = "Message broker engine version"
   type        = string
-  default     = "3.9.16"
+  default     = "3.13"
 }
 
 variable "mq_instance_type" {
   description = "Message broker instance type"
   type        = string
   default     = "mq.t3.micro"
+}
+
+# Kafka Configuration Variables
+variable "kafka_version" {
+  description = "Kafka version"
+  type        = string
+  default     = "2.8.1"
+}
+
+variable "kafka_instance_type" {
+  description = "Kafka broker instance type"
+  type        = string
+  default     = "kafka.t3.small"
+}
+
+variable "kafka_broker_count" {
+  description = "Number of Kafka broker nodes"
+  type        = number
+  default     = 2
+}
+
+variable "kafka_volume_size" {
+  description = "Size of the EBS volume for Kafka broker (GB)"
+  type        = number
+  default     = 20
+}
+
+variable "kafka_monitoring_level" {
+  description = "Monitoring level for Kafka cluster (DEFAULT, PER_BROKER, PER_TOPIC_PER_BROKER, or PER_TOPIC_PER_PARTITION)"
+  type        = string
+  default     = "DEFAULT"
 }
 
 # Redis Configuration Variables

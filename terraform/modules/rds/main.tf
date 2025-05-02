@@ -73,25 +73,25 @@ resource "aws_db_parameter_group" "main" {
 
 # RDS instance
 resource "aws_db_instance" "main" {
-  identifier           = "${var.project_name}-${var.env_id}-db"
-  engine               = var.engine
-  engine_version       = var.engine_version
-  instance_class       = var.instance_class
-  allocated_storage    = var.allocated_storage
-  storage_type         = "gp2"
-  
-  db_name              = local.db_name
-  username             = local.db_username
-  password             = local.db_password
-  
+  identifier        = "${var.project_name}-${var.env_id}-db"
+  engine            = var.engine
+  engine_version    = var.engine_version
+  instance_class    = var.instance_class
+  allocated_storage = var.allocated_storage
+  storage_type      = "gp2"
+
+  db_name  = local.db_name
+  username = local.db_username
+  password = local.db_password
+
   vpc_security_group_ids = [aws_security_group.db.id]
   db_subnet_group_name   = aws_db_subnet_group.main.name
   parameter_group_name   = aws_db_parameter_group.main.name
-  
+
   backup_retention_period = 1
   skip_final_snapshot     = true
   deletion_protection     = false
-  
+
   tags = merge(
     var.tags,
     {
@@ -104,7 +104,7 @@ resource "aws_db_instance" "main" {
 resource "aws_secretsmanager_secret" "db_credentials" {
   name        = "${var.project_name}-${var.env_id}-db-credentials"
   description = "Database credentials for build-and-burn environment"
-  
+
   tags = var.tags
 }
 

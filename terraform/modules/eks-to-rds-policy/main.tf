@@ -6,7 +6,7 @@ locals {
 resource "aws_iam_policy" "eks_to_rds" {
   name        = local.policy_name
   description = "IAM policy allowing EKS nodes to access RDS and retrieve database credentials"
-  
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -31,7 +31,7 @@ resource "aws_iam_policy" "eks_to_rds" {
       }
     ]
   })
-  
+
   tags = merge(
     var.tags,
     {

@@ -60,10 +60,10 @@ resource "aws_mq_broker" "main" {
   engine_type        = var.engine_type
   engine_version     = var.engine_version
   host_instance_type = var.instance_type
-  
-  security_groups    = [aws_security_group.mq.id]
-  subnet_ids         = [var.subnet_ids[0]] # Single-instance broker uses only one subnet
-  
+
+  security_groups = [aws_security_group.mq.id]
+  subnet_ids      = [var.subnet_ids[0]] # Single-instance broker uses only one subnet
+
   user {
     username = local.mq_username
     password = local.mq_password
@@ -97,17 +97,17 @@ resource "aws_mq_broker" "main" {
 resource "aws_secretsmanager_secret" "mq_credentials" {
   name        = "${var.project_name}-${var.env_id}-mq-credentials"
   description = "Message broker credentials for build-and-burn environment"
-  
+
   tags = var.tags
 }
 
 resource "aws_secretsmanager_secret_version" "mq_credentials" {
   secret_id = aws_secretsmanager_secret.mq_credentials.id
   secret_string = jsonencode({
-    username      = local.mq_username,
-    password      = local.mq_password,
-    engine_type   = var.engine_type,
-    host          = aws_mq_broker.main.instances[0].endpoints[0],
-    console_url   = "https://${aws_mq_broker.main.instances[0].console_url}"
+    username    = local.mq_username,
+    password    = local.mq_password,
+    engine_type = var.engine_type,
+    host        = aws_mq_broker.main.instances[0].endpoints[0],
+    console_url = "https://${aws_mq_broker.main.instances[0].console_url}"
   })
 } 

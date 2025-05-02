@@ -6,7 +6,7 @@ locals {
 resource "aws_iam_policy" "mq_full_access" {
   name        = local.policy_name
   description = "IAM policy allowing full access to Amazon MQ resources"
-  
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -33,7 +33,7 @@ resource "aws_iam_policy" "mq_full_access" {
       }
     ]
   })
-  
+
   tags = merge(
     var.tags,
     {

@@ -105,7 +105,7 @@ resource "aws_elasticache_replication_group" "main" {
   at_rest_encryption_enabled = var.at_rest_encryption_enabled
   transit_encryption_enabled = var.transit_encryption_enabled
   auth_token                 = var.auth_enabled ? random_password.redis_auth[0].result : null
-  
+
   # Maintenance and backup settings
   maintenance_window         = var.maintenance_window
   snapshot_window            = var.snapshot_window
@@ -126,20 +126,20 @@ resource "aws_secretsmanager_secret" "redis_credentials" {
   count       = var.auth_enabled ? 1 : 0
   name        = "${var.project_name}-${var.env_id}-cache-credentials"
   description = "Redis credentials for build-and-burn environment"
-  
+
   tags = var.tags
 }
 
 resource "aws_secretsmanager_secret_version" "redis_credentials" {
   count     = var.auth_enabled ? 1 : 0
   secret_id = aws_secretsmanager_secret.redis_credentials[0].id
-  
+
   secret_string = jsonencode({
-    host         = aws_elasticache_replication_group.main.primary_endpoint_address
-    port         = local.redis_port
-    auth_enabled = var.auth_enabled
-    auth_token   = var.auth_enabled ? random_password.redis_auth[0].result : null
-    tls_enabled  = var.transit_encryption_enabled
+    host           = aws_elasticache_replication_group.main.primary_endpoint_address
+    port           = local.redis_port
+    auth_enabled   = var.auth_enabled
+    auth_token     = var.auth_enabled ? random_password.redis_auth[0].result : null
+    tls_enabled    = var.transit_encryption_enabled
     connection_url = "${var.transit_encryption_enabled ? "rediss" : "redis"}://${var.auth_enabled ? ":${random_password.redis_auth[0].result}@" : ""}${aws_elasticache_replication_group.main.primary_endpoint_address}:${local.redis_port}"
   })
 } 

@@ -6,7 +6,7 @@ locals {
 resource "aws_iam_policy" "rds_write_access" {
   name        = local.policy_name
   description = "IAM policy allowing write access to RDS resources"
-  
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -38,7 +38,7 @@ resource "aws_iam_policy" "rds_write_access" {
       }
     ]
   })
-  
+
   tags = merge(
     var.tags,
     {

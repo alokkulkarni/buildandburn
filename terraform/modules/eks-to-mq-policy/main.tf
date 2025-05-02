@@ -6,7 +6,7 @@ locals {
 resource "aws_iam_policy" "eks_to_mq" {
   name        = local.policy_name
   description = "IAM policy allowing EKS nodes to access Amazon MQ and retrieve broker credentials"
-  
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -30,7 +30,7 @@ resource "aws_iam_policy" "eks_to_mq" {
       }
     ]
   })
-  
+
   tags = merge(
     var.tags,
     {

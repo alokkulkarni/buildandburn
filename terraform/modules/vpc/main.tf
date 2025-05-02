@@ -30,8 +30,8 @@ resource "aws_subnet" "public" {
   tags = merge(
     var.tags,
     {
-      Name                        = "${var.project_name}-${var.env_id}-public-${local.azs[count.index]}"
-      "kubernetes.io/role/elb"    = "1"
+      Name                                                              = "${var.project_name}-${var.env_id}-public-${local.azs[count.index]}"
+      "kubernetes.io/role/elb"                                          = "1"
       "kubernetes.io/cluster/${var.project_name}-${var.env_id}-cluster" = "shared"
     }
   )
@@ -48,8 +48,8 @@ resource "aws_subnet" "private" {
   tags = merge(
     var.tags,
     {
-      Name                              = "${var.project_name}-${var.env_id}-private-${local.azs[count.index]}"
-      "kubernetes.io/role/internal-elb" = "1"
+      Name                                                              = "${var.project_name}-${var.env_id}-private-${local.azs[count.index]}"
+      "kubernetes.io/role/internal-elb"                                 = "1"
       "kubernetes.io/cluster/${var.project_name}-${var.env_id}-cluster" = "shared"
     }
   )
@@ -59,7 +59,7 @@ resource "aws_subnet" "private" {
 resource "aws_subnet" "database" {
   count                   = local.az_count
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = cidrsubnet(var.cidr_block, 8, count.index + 2*local.az_count)
+  cidr_block              = cidrsubnet(var.cidr_block, 8, count.index + 2 * local.az_count)
   availability_zone       = local.azs[count.index]
   map_public_ip_on_launch = false
 
@@ -85,7 +85,7 @@ resource "aws_internet_gateway" "main" {
 
 # Elastic IPs for NAT Gateways
 resource "aws_eip" "nat" {
-  count = 1  # Changed from local.az_count to 1
+  count = 1 # Changed from local.az_count to 1
   # domain = "vpc"
 
   tags = merge(
@@ -98,9 +98,9 @@ resource "aws_eip" "nat" {
 
 # NAT Gateways - Only create one for all AZs
 resource "aws_nat_gateway" "main" {
-  count         = 1  # Changed from local.az_count to 1
+  count         = 1 # Changed from local.az_count to 1
   allocation_id = aws_eip.nat[0].id
-  subnet_id     = aws_subnet.public[0].id  # Using the first public subnet
+  subnet_id     = aws_subnet.public[0].id # Using the first public subnet
 
   tags = merge(
     var.tags,
@@ -135,8 +135,8 @@ resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
 
   route {
-    cidr_block = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main[0].id  # All private subnets use the same NAT gateway
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main[0].id # All private subnets use the same NAT gateway
   }
 
   tags = merge(
@@ -153,8 +153,8 @@ resource "aws_route_table" "database" {
   vpc_id = aws_vpc.main.id
 
   route {
-    cidr_block = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main[0].id  # All database subnets use the same NAT gateway
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main[0].id # All database subnets use the same NAT gateway
   }
 
   tags = merge(

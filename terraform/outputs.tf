@@ -83,4 +83,35 @@ output "redis_connection_url" {
 output "redis_secrets_arn" {
   description = "The ARN of the Secrets Manager secret containing ElastiCache credentials"
   value       = contains(var.dependencies, "redis") && var.redis_auth_enabled ? module.elasticache[0].secrets_manager_secret_arn : null
+}
+
+# Kafka outputs
+output "kafka_bootstrap_brokers" {
+  description = "Connection host:port pairs for the Kafka cluster (plaintext)"
+  value       = contains(var.dependencies, "kafka") ? module.kafka[0].kafka_bootstrap_brokers : null
+}
+
+output "kafka_bootstrap_brokers_tls" {
+  description = "TLS Connection host:port pairs for the Kafka cluster"
+  value       = contains(var.dependencies, "kafka") ? module.kafka[0].kafka_bootstrap_brokers_tls : null
+}
+
+output "kafka_bootstrap_brokers_sasl_scram" {
+  description = "SASL SCRAM Connection host:port pairs for the Kafka cluster"
+  value       = contains(var.dependencies, "kafka") ? module.kafka[0].kafka_bootstrap_brokers_sasl_scram : null
+}
+
+output "kafka_zookeeper_connect_string" {
+  description = "Zookeeper connection string for the Kafka cluster"
+  value       = contains(var.dependencies, "kafka") ? module.kafka[0].kafka_zookeeper_connect_string : null
+}
+
+output "kafka_arn" {
+  description = "ARN of the Kafka cluster"
+  value       = contains(var.dependencies, "kafka") ? module.kafka[0].kafka_arn : null
+}
+
+output "kafka_secret_arn" {
+  description = "ARN of the secret containing Kafka configuration"
+  value       = contains(var.dependencies, "kafka") ? module.kafka[0].kafka_secret_arn : null
 } 

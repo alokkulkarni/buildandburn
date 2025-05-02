@@ -6,7 +6,7 @@ locals {
 resource "aws_iam_policy" "eks_to_elasticache" {
   name        = local.policy_name
   description = "IAM policy allowing EKS nodes to access Amazon ElastiCache and retrieve cache information"
-  
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -52,13 +52,13 @@ resource "aws_iam_policy" "eks_to_elasticache" {
         Resource = "*"
         Condition = {
           StringEquals = {
-            "kms:ViaService": "secretsmanager.${var.region}.amazonaws.com"
+            "kms:ViaService" : "secretsmanager.${var.region}.amazonaws.com"
           }
         }
       }
     ]
   })
-  
+
   tags = merge(
     var.tags,
     {

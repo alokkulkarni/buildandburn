@@ -21,18 +21,18 @@ output "security_group_id" {
 output "connection_info" {
   description = "Connection information for the ElastiCache cluster"
   value = {
-    host           = aws_elasticache_replication_group.main.primary_endpoint_address
-    port           = local.redis_port
-    auth_enabled   = var.auth_enabled
-    tls_enabled    = var.transit_encryption_enabled
+    host         = aws_elasticache_replication_group.main.primary_endpoint_address
+    port         = local.redis_port
+    auth_enabled = var.auth_enabled
+    tls_enabled  = var.transit_encryption_enabled
   }
   sensitive = true
 }
 
 output "connection_url" {
   description = "Connection URL for the ElastiCache cluster"
-  value = "${var.transit_encryption_enabled ? "rediss" : "redis"}://${var.auth_enabled ? ":${random_password.redis_auth[0].result}@" : ""}${aws_elasticache_replication_group.main.primary_endpoint_address}:${local.redis_port}"
-  sensitive = true
+  value       = "${var.transit_encryption_enabled ? "rediss" : "redis"}://${var.auth_enabled ? ":${random_password.redis_auth[0].result}@" : ""}${aws_elasticache_replication_group.main.primary_endpoint_address}:${local.redis_port}"
+  sensitive   = true
 }
 
 output "replication_group_id" {

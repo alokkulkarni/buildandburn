@@ -1,3 +1,6 @@
+# This is a template file using Jinja2 syntax - not valid YAML until rendered
+# yaml-language-server: $schema=ignore
+# yamllint disable
 name: {{ name }}
 region: {{ region }}
 {% if customK8sPath %}

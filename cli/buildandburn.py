@@ -19,6 +19,12 @@ import string
 from datetime import datetime
 import importlib.util
 
+# Import version from __init__.py
+try:
+    from . import __version__
+except ImportError:
+    __version__ = "0.1.0"  # Default version if import fails
+
 # Global configuration
 CONFIG = {
     "TERRAFORM_APPLY_TIMEOUT": 3600,  # 1 hour timeout for terraform apply
@@ -3736,6 +3742,10 @@ def validate_terraform_modules_against_manifest(manifest, terraform_project_dir)
             "required": [],
             "missing": [],
             "available": [],
+        },
+        "dependencies": {
+            "required": [],
+            "missing": [],
             "connection_issues": []
         },
         "summary": "",
@@ -3996,6 +4006,15 @@ def validate_terraform_modules_against_manifest(manifest, terraform_project_dir)
         else:
             print_success("All required policy modules are available")
     
+    # Check for required access policy modules (the new modules we added)
+    required_access_policy_modules = validation_results.get("access_policy_modules", {}).get("required", [])
+    if required_access_policy_modules:
+        print_info(f"Required access policy modules: {', '.join(required_access_policy_modules)}")
+        if validation_results.get("access_policy_modules", {}).get("missing", []):
+            print_warning(f"Missing access policy modules: {', '.join(validation_results['access_policy_modules']['missing'])}")
+        else:
+            print_success("All required access policy modules are available")
+    
     if validation_results["iam_policies"]["missing"]:
         print_warning(f"Missing IAM policies: {', '.join(validation_results['iam_policies']['missing'])}")
     
@@ -4112,11 +4131,13 @@ module "{module_var_name}" {{
 
 def main():
     parser = argparse.ArgumentParser(description='Build and Burn - Create disposable development environments')
-    subparsers = parser.add_subparsers(dest='command', help='Command to run')
-    subparsers.required = True
     
     # Version information
     parser.add_argument('--version', action='store_true', help='Show version information')
+    
+    subparsers = parser.add_subparsers(dest='command', help='Command to run')
+    # Only make command required if version is not provided
+    subparsers.required = False
     
     # Up command
     parser_up = subparsers.add_parser('up', help='Create a new environment')
@@ -4147,9 +4168,15 @@ def main():
     
     args = parser.parse_args()
     
+    # Handle version flag first
     if args.version:
         print(f"Build and Burn version {__version__}")
-        sys.exit(0)
+        return 0
+    
+    # If no command was provided and version flag wasn't used, show help
+    if not hasattr(args, 'command') or args.command is None:
+        parser.print_help()
+        return 1
     
     # Check prerequisites before running
     if args.command == 'up':
@@ -4157,23 +4184,24 @@ def main():
         if not prerequisites_ok:
             print_warning("One or more prerequisites are missing.")
             if input("Continue anyway? (y/N): ").lower() != 'y':
-                sys.exit(1)
+                return 1
     
     # Run the selected command
     try:
         success = args.func(args)
         if not success:
-            sys.exit(1)
+            return 1
+        return 0
     except KeyboardInterrupt:
         print_warning("\nOperation cancelled by user.")
         if args.command == 'up':
             print_info("Note: Infrastructure may have been partially created.")
             print_info("You can destroy it with the 'down' command if needed.")
-        sys.exit(1)
+        return 1
     except Exception as e:
         print_error(f"Error executing command: {str(e)}")
         traceback.print_exc()
-        sys.exit(1)
+        return 1
 
 if __name__ == "__main__":
     sys.exit(main()) 

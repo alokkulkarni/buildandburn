@@ -1,4 +1,27 @@
 #!/usr/bin/env python3
+"""
+BuildAndBurn - Infrastructure Provisioning and Deployment Tool
+
+This script automates the provisioning of cloud infrastructure using Terraform 
+and deployment of applications to Kubernetes. It follows a "build and burn" 
+approach where environments can be quickly created and destroyed.
+
+Main features:
+- Creates AWS infrastructure (VPC, EKS, RDS, MQ, Redis, Kafka)
+- Deploys applications to Kubernetes
+- Provides environment management with unique IDs
+- Handles dependencies between services
+- Supports custom configurations via manifest files
+
+Usage:
+  python buildandburn.py up -m manifest.yaml    # Create/update infrastructure and deploy services
+  python buildandburn.py down -i ENV_ID         # Destroy infrastructure for environment
+  python buildandburn.py info -i ENV_ID         # Get information about environment
+  python buildandburn.py list                    # List all environments
+
+Author: BuildAndBurn Team
+Version: 1.0.0
+"""
 
 import argparse
 import os
@@ -18,416 +41,392 @@ import random
 import string
 from datetime import datetime
 import importlib.util
+import signal
+import socket
+import base64
+import ipaddress
+from urllib.parse import urlparse
+import hashlib
+import logging
 
-# Import version from __init__.py
-try:
-    from . import __version__
-except ImportError:
-    __version__ = "0.1.0"  # Default version if import fails
+# Version information
+__version__ = "1.0.0"
 
-# Global configuration
-CONFIG = {
-    "TERRAFORM_APPLY_TIMEOUT": 7200,  # 2 hour timeout for terraform apply
-    "TERRAFORM_DESTROY_TIMEOUT": 3600,  # 1 hour timeout for terraform destroy
-    "TERRAFORM_INIT_TIMEOUT": 300,    # 5 minutes timeout for terraform init
-    "PROGRESS_UPDATE_INTERVAL": 30,   # Update progress every 30 seconds
-    "DEBUG": False
-}
+# Constants
+TERRAFORM_MIN_VERSION = "1.0.0"
+KUBECTL_MIN_VERSION = "1.20.0"
+AWS_CLI_MIN_VERSION = "2.0.0"
 
-# Try to import the k8s_generator module if available
-try:
-    # First try to import from the same directory
-    k8s_generator_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "k8s_generator.py")
-    if os.path.exists(k8s_generator_path):
-        spec = importlib.util.spec_from_file_location("k8s_generator", k8s_generator_path)
-        k8s_generator = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(k8s_generator)
-        print_info = lambda msg: None  # Dummy function to avoid undefined reference
-        print_info("K8s generator module loaded successfully")
-        k8s_generator_available = True
-    else:
-        k8s_generator_available = False
-except Exception as e:
-    print(f"Note: K8s generator module not loaded: {str(e)}")
-    k8s_generator_available = False
+#####################################################################
+# Logging and Output Functions
+#####################################################################
 
 def print_color(text, color_code):
-    """Print text with color."""
+    """
+    Print text with specified color code.
+    
+    Args:
+        text (str): The text to print
+        color_code (str): ANSI color code to use
+    """
     print(f"\033[{color_code}m{text}\033[0m")
 
 def print_success(text):
-    print_color(text, 92)  # Green
+    """Print success message in green."""
+    print_color(f"✅ {text}", "92")
 
 def print_info(text):
-    print_color(text, 94)  # Blue
+    """Print information message in blue."""
+    print_color(f"ℹ️ {text}", "94")
 
 def print_warning(text):
-    print_color(text, 93)  # Yellow
+    """Print warning message in yellow."""
+    print_color(f"⚠️ {text}", "93")
 
 def print_error(text):
-    print_color(text, 91)  # Red
+    """Print error message in red."""
+    print_color(f"❌ {text}", "91")
 
 def run_command(cmd, cwd=None, capture_output=False, allow_fail=False, env=None):
-    """Run a command and return the process result."""
-    print_info(f"Executing command: {cmd}")
-    print_info(f"Working directory: {cwd}")
+    """
+    Execute a shell command with improved error handling and output capture.
     
-    if capture_output:
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=not allow_fail,
-                env=env
-            )
+    Args:
+        cmd (str or list): Command to run (string or list of arguments)
+        cwd (str, optional): Working directory for the command
+        capture_output (bool): Whether to capture and return command output
+        allow_fail (bool): If True, don't raise exception on command failure
+        env (dict, optional): Environment variables for the command
+        
+    Returns:
+        If capture_output is True, returns subprocess.CompletedProcess object
+        Otherwise returns True if command succeeded
+        
+    Raises:
+        Exception: If command fails and allow_fail is False
+    """
+    # Create a merged environment with existing env vars plus any provided ones
+    merged_env = None
+    if env:
+        merged_env = os.environ.copy()
+        merged_env.update(env)
+    
+    print_info(f"Executing command: {cmd}")
+    if cwd:
+        print_info(f"Working directory: {cwd}")
+    
+    try:
+        if capture_output:
+            if isinstance(cmd, list):
+                result = subprocess.run(cmd, cwd=cwd, check=not allow_fail, 
+                                      capture_output=True, text=True, env=merged_env)
+                return result
+            else:
+                result = subprocess.run(cmd, cwd=cwd, check=not allow_fail, 
+                                      capture_output=True, text=True, shell=True, env=merged_env)
+                return result
+        else:
+            if isinstance(cmd, list):
+                subprocess.run(cmd, cwd=cwd, check=not allow_fail, env=merged_env)
+            else:
+                subprocess.run(cmd, cwd=cwd, check=not allow_fail, shell=True, env=merged_env)
+            return True
+    except subprocess.CalledProcessError as e:
+        if allow_fail:
+            class ErrorResult:
+                def __init__(self, exception):
+                    self.returncode = exception.returncode
+                    self.stdout = exception.stdout if hasattr(exception, 'stdout') else ""
+                    self.stderr = exception.stderr if hasattr(exception, 'stderr') else ""
+                    self.exception = exception
             
-            # Check for specific error codes
-            if result.returncode == 127:  # Command not found
-                if isinstance(cmd, list) and cmd:
-                    command_name = cmd[0]
-                else:
-                    command_name = cmd.split()[0] if isinstance(cmd, str) else "command"
-                
-                print_error(f"Command '{command_name}' not found. Make sure it's installed and in your PATH.")
-                
-                # Check for some common commands and provide installation instructions
-                if command_name == "terraform":
-                    print_info("Terraform installation instructions: https://www.terraform.io/downloads.html")
-                elif command_name == "kubectl":
-                    print_info("kubectl installation instructions: https://kubernetes.io/docs/tasks/tools/")
-                elif command_name == "aws":
-                    print_info("AWS CLI installation instructions: https://aws.amazon.com/cli/")
-                
-                # Provide user's PATH for debugging
-                print_info(f"Current PATH: {os.environ.get('PATH', 'Not available')}")
-                
-                if allow_fail:
-                    return result
-                else:
-                    raise FileNotFoundError(f"Command '{command_name}' not found")
+            return ErrorResult(e)
+        else:
+            print_error(f"Command failed with exit code {e.returncode}")
+            if hasattr(e, 'stdout') and e.stdout:
+                print_info("Command output:")
+                print(e.stdout)
+            if hasattr(e, 'stderr') and e.stderr:
+                print_error("Command error output:")
+                print(e.stderr)
+            raise Exception(f"Command '{cmd}' returned non-zero exit status {e.returncode}.")
+    except Exception as e:
+        print_error(f"Exception running command: {str(e)}")
+        traceback.print_exc()
+        if allow_fail:
+            class ErrorResult:
+                def __init__(self, exception):
+                    self.returncode = 1
+                    self.stdout = ""
+                    self.stderr = str(exception)
+                    self.exception = exception
             
-            return result
-        except subprocess.CalledProcessError as e:
-            if allow_fail:
-                return e
-            print_error(f"Failed to execute command: {e}")
-            print_error(f"Command was: {cmd}")
-            print_error(f"Working directory: {cwd}")
-            if e.output:
-                print_error(f"Output: {e.output}")
-            if e.stderr:
-                print_error(f"Error: {e.stderr}")
-            raise
-        except Exception as e:
-            if allow_fail:
-                # Create a subprocess-like result object
-                class ErrorResult:
-                    def __init__(self, exception):
-                        self.returncode = 1
-                        self.exception = exception
-                        self.stdout = ""
-                        self.stderr = str(exception)
-                
-                return ErrorResult(e)
-            print_error(f"Exception running command: {str(e)}")
-            print_error(f"Command was: {cmd}")
-            print_error(f"Working directory: {cwd}")
-            raise
-    else:
-        try:
-            # For non-captured output, use Popen to stream output in real-time
-            process = subprocess.Popen(
-                cmd,
-                cwd=cwd,
-                shell=isinstance(cmd, str),
-                env=env
-            )
-            returncode = process.wait()
-            
-            if returncode == 127:  # Command not found
-                if isinstance(cmd, list) and cmd:
-                    command_name = cmd[0]
-                else:
-                    command_name = cmd.split()[0] if isinstance(cmd, str) else "command"
-                
-                print_error(f"Command '{command_name}' not found. Make sure it's installed and in your PATH.")
-                
-                # Provide installation instructions
-                if command_name == "terraform":
-                    print_info("Terraform installation instructions: https://www.terraform.io/downloads.html")
-                elif command_name == "kubectl":
-                    print_info("kubectl installation instructions: https://kubernetes.io/docs/tasks/tools/")
-                elif command_name == "aws":
-                    print_info("AWS CLI installation instructions: https://aws.amazon.com/cli/")
-                
-                if allow_fail:
-                    return returncode
-                else:
-                    raise FileNotFoundError(f"Command '{command_name}' not found")
-            
-            if returncode != 0 and not allow_fail:
-                raise subprocess.CalledProcessError(returncode, cmd)
-            
-            return returncode
-        except Exception as e:
-            if allow_fail:
-                return 1
-            print_error(f"Exception running command: {str(e)}")
-            print_error(f"Command was: {cmd}")
-            print_error(f"Working directory: {cwd}")
-            raise
+            return ErrorResult(e)
+        else:
+            raise Exception(f"Exception running command: {str(e)}")
 
 def is_terraform_installed():
-    """Check if Terraform is installed and available in the PATH."""
+    """
+    Check if Terraform is installed and meets the minimum version requirement.
+    
+    Returns:
+        tuple: (bool, str) - Whether Terraform is installed and meets requirements,
+               and the installed version string
+    """
     try:
-        result = subprocess.run(
-            ["terraform", "version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        if result.returncode == 0:
-            version_match = re.search(r'Terraform v(\d+\.\d+\.\d+)', result.stdout)
-            if version_match:
-                version = version_match.group(1)
-                print_info(f"Terraform version {version} found.")
-                return True
-            return True
-        else:
-            print_warning("Terraform command found but returned an error.")
-            if result.stderr:
-                print_warning(f"Error: {result.stderr}")
-            return False
-    except FileNotFoundError:
-        print_warning("Terraform command not found in PATH.")
-        # Check in common installation directories
-        common_paths = [
-            "/usr/local/bin/terraform",
-            "/usr/bin/terraform",
-            "/opt/homebrew/bin/terraform",
-            os.path.expanduser("~/bin/terraform"),
-            os.path.expanduser("~/.local/bin/terraform")
-        ]
+        result = subprocess.run(["terraform", "--version"], 
+                              capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            return False, None
         
-        for path in common_paths:
-            if os.path.exists(path) and os.access(path, os.X_OK):
-                print_info(f"Terraform found at {path} but not in your PATH.")
-                print_info(f"Add the directory to your PATH or use the full path to the executable.")
-                return False
+        # Extract version number
+        match = re.search(r'Terraform v(\d+\.\d+\.\d+)', result.stdout)
+        if not match:
+            return False, None
         
-        print_warning("Terraform not found in common installation directories.")
-        print_info("Please install Terraform from: https://www.terraform.io/downloads.html")
-        return False
+        version = match.group(1)
+        # Check if version meets minimum requirement
+        version_parts = list(map(int, version.split('.')))
+        min_version_parts = list(map(int, TERRAFORM_MIN_VERSION.split('.')))
+        
+        # Compare version components
+        for i in range(len(min_version_parts)):
+            if i >= len(version_parts):
+                return False, version
+            if version_parts[i] < min_version_parts[i]:
+                return False, version
+            if version_parts[i] > min_version_parts[i]:
+                break
+        
+        return True, version
     except Exception as e:
-        print_warning(f"Error checking Terraform installation: {str(e)}")
-        return False
+        print_error(f"Error checking Terraform installation: {str(e)}")
+        return False, None
 
 def is_kubectl_installed():
-    """Check if kubectl is installed and available in the PATH."""
+    """
+    Check if kubectl is installed and meets the minimum version requirement.
+    
+    Returns:
+        tuple: (bool, str) - Whether kubectl is installed and meets requirements,
+               and the installed version string
+    """
     try:
-        result = subprocess.run(
-            ["kubectl", "version", "--client"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        if result.returncode == 0:
-            version_output = result.stdout if result.stdout else result.stderr
-            version_match = re.search(r'Client Version: .*?v(\d+\.\d+\.\d+)', version_output)
-            if version_match:
-                version = version_match.group(1)
-                print_info(f"kubectl version {version} found.")
-                return True
-            return True
+        result = subprocess.run(["kubectl", "version", "--client", "--output=json"], 
+                              capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            # Try the older version format
+            result = subprocess.run(["kubectl", "version", "--client"], 
+                                  capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                return False, None
+            
+            # Extract version from text output
+            match = re.search(r'Client Version: v?(\d+\.\d+\.\d+)', result.stdout)
+            if not match:
+                return False, None
+            version = match.group(1)
         else:
-            print_warning("kubectl command found but returned an error.")
-            if result.stderr:
-                print_warning(f"Error: {result.stderr}")
-            return False
-    except FileNotFoundError:
-        print_warning("kubectl command not found in PATH.")
-        # Check in common installation directories
-        common_paths = [
-            "/usr/local/bin/kubectl",
-            "/usr/bin/kubectl",
-            "/opt/homebrew/bin/kubectl",
-            os.path.expanduser("~/bin/kubectl"),
-            os.path.expanduser("~/.local/bin/kubectl")
-        ]
+            # Parse JSON output
+            try:
+                version_info = json.loads(result.stdout)
+                if 'clientVersion' in version_info:
+                    version = version_info['clientVersion']['gitVersion'].lstrip('v')
+                else:
+                    version = version_info['kustomizeVersion'].lstrip('v')
+            except json.JSONDecodeError:
+                # Fallback to regex if JSON parsing fails
+                match = re.search(r'Client Version: v?(\d+\.\d+\.\d+)', result.stdout)
+                if not match:
+                    return False, None
+                version = match.group(1)
         
-        for path in common_paths:
-            if os.path.exists(path) and os.access(path, os.X_OK):
-                print_info(f"kubectl found at {path} but not in your PATH.")
-                print_info(f"Add the directory to your PATH or use the full path to the executable.")
-                return False
+        # Check version meets minimum requirement (simplified for example)
+        version_parts = list(map(int, version.split('.')))
+        min_version_parts = list(map(int, KUBECTL_MIN_VERSION.split('.')))
         
-        print_warning("kubectl not found in common installation directories.")
-        print_info("Please install kubectl from: https://kubernetes.io/docs/tasks/tools/")
-        return False
+        for i in range(len(min_version_parts)):
+            if i >= len(version_parts):
+                return False, version
+            if version_parts[i] < min_version_parts[i]:
+                return False, version
+            if version_parts[i] > min_version_parts[i]:
+                break
+        
+        return True, version
     except Exception as e:
-        print_warning(f"Error checking kubectl installation: {str(e)}")
-        return False
+        print_error(f"Error checking kubectl installation: {str(e)}")
+        return False, None
 
 def is_aws_cli_installed():
-    """Check if AWS CLI is installed and available in the PATH."""
+    """
+    Check if AWS CLI is installed and meets the minimum version requirement.
+    
+    Returns:
+        tuple: (bool, str) - Whether AWS CLI is installed and meets requirements,
+               and the installed version string
+    """
     try:
-        result = subprocess.run(
-            ["aws", "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        if result.returncode == 0:
-            version_output = result.stdout if result.stdout else result.stderr
-            version_match = re.search(r'aws-cli/(\d+\.\d+\.\d+)', version_output)
-            if version_match:
-                version = version_match.group(1)
-                print_info(f"AWS CLI version {version} found.")
-                return True
-            return True
-        else:
-            print_warning("AWS CLI command found but returned an error.")
-            if result.stderr:
-                print_warning(f"Error: {result.stderr}")
-            return False
-    except FileNotFoundError:
-        print_warning("AWS CLI command not found in PATH.")
-        # Check in common installation directories
-        common_paths = [
-            "/usr/local/bin/aws",
-            "/usr/bin/aws",
-            "/opt/homebrew/bin/aws",
-            os.path.expanduser("~/bin/aws"),
-            os.path.expanduser("~/.local/bin/aws")
-        ]
+        result = subprocess.run(["aws", "--version"], 
+                              capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            return False, None
         
-        for path in common_paths:
-            if os.path.exists(path) and os.access(path, os.X_OK):
-                print_info(f"AWS CLI found at {path} but not in your PATH.")
-                print_info(f"Add the directory to your PATH or use the full path to the executable.")
-                return False
+        # Extract version number
+        match = re.search(r'aws-cli/(\d+\.\d+\.\d+)', result.stdout)
+        if not match:
+            return False, None
         
-        print_warning("AWS CLI not found in common installation directories.")
-        print_info("Please install AWS CLI from: https://aws.amazon.com/cli/")
-        return False
+        version = match.group(1)
+        
+        # Check if version meets minimum requirement
+        version_parts = list(map(int, version.split('.')))
+        min_version_parts = list(map(int, AWS_CLI_MIN_VERSION.split('.')))
+        
+        for i in range(len(min_version_parts)):
+            if i >= len(version_parts):
+                return False, version
+            if version_parts[i] < min_version_parts[i]:
+                return False, version
+            if version_parts[i] > min_version_parts[i]:
+                break
+        
+        return True, version
     except Exception as e:
-        print_warning(f"Error checking AWS CLI installation: {str(e)}")
-        return False
+        print_error(f"Error checking AWS CLI installation: {str(e)}")
+        return False, None
 
 def check_prerequisites():
-    """Check if required tools are installed."""
-    print_color("\n===============================================================================", "34")
-    print_color("CHECKING PREREQUISITES", "34")
-    print_color("===============================================================================", "34")
+    """
+    Check if all required prerequisites are installed.
     
-    prerequisites_ok = True
-    missing_tools = []
+    This function verifies that Terraform, kubectl, and AWS CLI are installed
+    and meet the minimum version requirements.
+    
+    Returns:
+        bool: True if all prerequisites are installed and meet requirements
+    """
+    print_info("=" * 79)
+    print_info("CHECKING PREREQUISITES")
+    print_info("=" * 79)
     
     # Check Terraform
-    if not is_terraform_installed():
-        prerequisites_ok = False
-        missing_tools.append("terraform")
-        print_error("Terraform is required but not found.")
-        print_info("Please install Terraform from: https://www.terraform.io/downloads.html")
+    tf_installed, tf_version = is_terraform_installed()
+    if tf_installed:
+        print_info(f"Terraform version {tf_version} found.")
+    else:
+        print_error(f"Terraform version {TERRAFORM_MIN_VERSION} or higher is required.")
+        print_error("Please install Terraform: https://learn.hashicorp.com/tutorials/terraform/install-cli")
+        return False
     
     # Check AWS CLI
-    if not is_aws_cli_installed():
-        prerequisites_ok = False
-        missing_tools.append("aws-cli")
-        print_error("AWS CLI is required but not found.")
-        print_info("Please install AWS CLI from: https://aws.amazon.com/cli/")
+    aws_installed, aws_version = is_aws_cli_installed()
+    if aws_installed:
+        print_info(f"AWS CLI version {aws_version} found.")
+    else:
+        print_error(f"AWS CLI version {AWS_CLI_MIN_VERSION} or higher is required.")
+        print_error("Please install AWS CLI: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html")
+        return False
     
     # Check kubectl
-    if not is_kubectl_installed():
-        prerequisites_ok = False
-        missing_tools.append("kubectl")
-        print_error("kubectl is required but not found.")
-        print_info("Please install kubectl from: https://kubernetes.io/docs/tasks/tools/")
-    
-    # Summary and confirmation
-    if not prerequisites_ok:
-        print_color("\n===============================================================================", "31")
-        print_error(f"MISSING PREREQUISITES: {', '.join(missing_tools)}")
-        print_color("===============================================================================", "31")
-        
-        # Check if we should prompt for continuation
-        if os.environ.get('BUILDANDBURN_IGNORE_MISSING_PREREQUISITES') == '1':
-            print_warning("Ignoring missing prerequisites due to BUILDANDBURN_IGNORE_MISSING_PREREQUISITES=1")
-            return True
-        
-        # Ask user if they want to continue anyway
-        try:
-            response = input("Continue anyway? This may lead to errors later. (y/N): ").strip().lower()
-            if response == 'y' or response == 'yes':
-                print_warning("Continuing despite missing prerequisites. Expect errors.")
-                return True
-            else:
-                print_info("Aborting due to missing prerequisites.")
-                sys.exit(1)
-        except KeyboardInterrupt:
-            print_info("\nAborted.")
-            sys.exit(1)
+    kubectl_installed, kubectl_version = is_kubectl_installed()
+    if kubectl_installed:
+        print_info(f"kubectl version {kubectl_version} found.")
     else:
-        print_success("All prerequisites are installed.")
+        print_error(f"kubectl version {KUBECTL_MIN_VERSION} or higher is required.")
+        print_error("Please install kubectl: https://kubernetes.io/docs/tasks/tools/")
+        return False
     
-    return prerequisites_ok
+    print_info("All prerequisites are installed.")
+    return True
 
 def load_manifest(manifest_path):
-    """Load the manifest file."""
+    """
+    Load and parse a YAML manifest file.
+    
+    Args:
+        manifest_path (str): Path to the manifest file
+        
+    Returns:
+        dict: Parsed manifest as a dictionary, or None if loading fails
+    """
     try:
-        with open(manifest_path, 'r') as f:
-            return yaml.safe_load(f)
+        with open(manifest_path, 'r') as file:
+            manifest = yaml.safe_load(file)
+        print_info("Manifest loaded successfully:")
+        print(yaml.dump(manifest, default_flow_style=False, sort_keys=False))
+        return manifest
     except Exception as e:
-        print_error(f"Failed to load manifest file: {e}")
-        sys.exit(1)
+        print_error(f"Failed to load manifest: {str(e)}")
+        return None
 
 def generate_env_id():
-    """Generate a unique environment ID."""
-    return str(uuid.uuid4())[:8]
+    """
+    Generate a unique environment ID to identify this deployment.
+    
+    Returns:
+        str: 8-character hexadecimal environment ID
+    """
+    return uuid.uuid4().hex[:8]
 
 def prepare_terraform_vars(manifest, env_id, project_dir):
-    """Prepare Terraform variables based on the manifest."""
-    # Extract dependencies from manifest
-    dependencies = []
-    if 'dependencies' in manifest:
-        for dep in manifest['dependencies']:
-            dependencies.append(dep['type'])
+    """
+    Prepare Terraform variables based on the manifest configuration.
     
-    print_info(f"Detected dependencies: {', '.join(dependencies) if dependencies else 'none'}")
+    This function extracts values from the manifest and transforms them into a format
+    suitable for Terraform variable files. It handles specific configurations for
+    different types of infrastructure components (EKS, RDS, MQ, Redis, Kafka).
     
-    # Create terraform.tfvars.json file
+    Args:
+        manifest (dict): The parsed manifest containing configuration
+        env_id (str): Unique environment ID for this deployment
+        project_dir (str): Path to project directory
+        
+    Returns:
+        dict: Dictionary of Terraform variables
+    """
+    # Initialize with common variables
     tf_vars = {
         "project_name": manifest['name'],
         "env_id": env_id,
         "region": manifest.get('region', 'us-west-2'),
-        "dependencies": dependencies,
-        # Add required variables with defaults to prevent errors
-        "vpc_cidr": "10.0.0.0/16",
-        "eks_instance_types": ["t3.medium"],
-        "eks_node_min": 1,
-        "eks_node_max": 3,
-        "k8s_version": "1.27"
+        "dependencies": [],
     }
+    
+    # Add default VPC and EKS configuration if not specified
+    tf_vars.update({
+        "vpc_cidr": manifest.get('vpc_cidr', '10.0.0.0/16'),
+        "eks_instance_types": manifest.get('eks_instance_types', ['t3.medium']),
+        "eks_node_min": manifest.get('eks_node_min', 1),
+        "eks_node_max": manifest.get('eks_node_max', 3),
+        "k8s_version": manifest.get('k8s_version', '1.27'),
+    })
+    
+    # Process dependencies
+    dependencies = []
+    if 'dependencies' in manifest and manifest['dependencies']:
+        for dep in manifest['dependencies']:
+            if 'type' in dep:
+                dependencies.append(dep['type'])
+    
+    tf_vars["dependencies"] = dependencies
     
     # Add database-specific variables if needed
     if 'database' in dependencies:
         db_config = next((d for d in manifest['dependencies'] if d['type'] == 'database'), None)
         if db_config:
             tf_vars.update({
-                "db_engine": db_config.get('provider', 'postgres'),
-                "db_engine_version": db_config.get('version', '13'),
-                "db_instance_class": db_config.get('instance_class', 'db.t3.small'),
-                "db_allocated_storage": int(db_config.get('storage', 20)),
+                "db_engine": db_config.get('engine', 'postgres'),
+                "db_engine_version": db_config.get('version', '15.3'),
+                "db_instance_class": db_config.get('instance_class', 'db.t3.micro'),
+                "db_allocated_storage": int(db_config.get('allocated_storage', 20)),
             })
         else:
             print_warning("Database dependency specified but no configuration found. Using defaults.")
             tf_vars.update({
                 "db_engine": "postgres",
-                "db_engine_version": "13",
-                "db_instance_class": "db.t3.small",
+                "db_engine_version": "15.3",
+                "db_instance_class": "db.t3.micro",
                 "db_allocated_storage": 20,
             })
     
@@ -471,359 +470,601 @@ def prepare_terraform_vars(manifest, env_id, project_dir):
                 "redis_multi_az_enabled": False,
             })
     
+    # Add Kafka-specific variables if needed
+    if 'kafka' in dependencies:
+        kafka_config = next((d for d in manifest['dependencies'] if d['type'] == 'kafka'), None)
+        if kafka_config:
+            tf_vars.update({
+                "kafka_version": kafka_config.get('version', '3.4.0'),
+                "kafka_instance_type": kafka_config.get('instance_type', 'kafka.t3.small'),
+                "kafka_broker_count": int(kafka_config.get('broker_count', 2)),
+                "kafka_volume_size": int(kafka_config.get('volume_size', 100)),
+                "kafka_monitoring_level": kafka_config.get('monitoring_level', 'DEFAULT'),
+            })
+        else:
+            print_warning("Kafka dependency specified but no configuration found. Using defaults.")
+            tf_vars.update({
+                "kafka_version": "3.4.0",
+                "kafka_instance_type": "kafka.t3.small",
+                "kafka_broker_count": 2,
+                "kafka_volume_size": 100,
+                "kafka_monitoring_level": "DEFAULT",
+            })
+    
     return tf_vars
 
 def run_preflight_checks(manifest, env_id, terraform_project_dir):
-    """Run pre-flight checks to ensure the script can proceed safely."""
+    """
+    Run pre-flight checks to ensure everything is properly configured.
+    
+    This function validates AWS credentials, region setting, and Terraform configuration
+    before attempting to provision infrastructure.
+    
+    Args:
+        manifest (dict): The parsed manifest containing configuration
+        env_id (str): Unique environment ID for this deployment
+        terraform_project_dir (str): Path to Terraform project directory
+        
+    Returns:
+        bool: True if all checks pass, False otherwise
+    """
     print_info("=" * 80)
     print_info("RUNNING PRE-FLIGHT CHECKS")
     print_info("=" * 80)
     
-    checks_passed = True
-    
-    # Check if AWS CLI is configured correctly
+    # Check AWS CLI configuration
     print_info("Checking AWS CLI configuration...")
     try:
-        # Check AWS CLI version
-        aws_version = subprocess.run(["aws", "--version"], 
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-                                    text=True, check=True)
-        print_info(f"AWS CLI: {aws_version.stdout.strip() or aws_version.stderr.strip()}")
+        aws_version_result = run_command(["aws", "--version"], capture_output=True)
+        print_info(f"AWS CLI: {aws_version_result.stdout.strip()}")
         
         # Check AWS identity
-        aws_identity = subprocess.run(["aws", "sts", "get-caller-identity"], 
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-                                     text=True, check=True)
-        print_info("AWS Identity check passed")
+        aws_identity = run_command(["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"], 
+                                  capture_output=True)
+        if aws_identity.returncode == 0:
+            print_info("AWS Identity check passed")
+        else:
+            print_error("AWS CLI is not properly configured. Please run 'aws configure'")
+            return False
         
-        # Check AWS region
-        aws_region = os.environ.get('AWS_REGION', manifest.get('region', 'us-west-2'))
-        print_info(f"Using AWS region: {aws_region}")
+        # Set AWS region if provided in manifest
+        region = manifest.get('region', 'us-west-2')
+        print_info(f"Using AWS region: {region}")
         
-        # Check if AWS region is valid
-        aws_regions = subprocess.run(["aws", "ec2", "describe-regions", "--query", "Regions[].RegionName", "--output", "text"], 
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-                                  text=True, check=True)
-        regions_list = aws_regions.stdout.strip().split()
-        if aws_region not in regions_list:
-            print_warning(f"Region {aws_region} may not be valid or enabled for your account")
-            print_warning(f"Available regions: {', '.join(regions_list[:5])}...")
-            checks_passed = False
+        # Set region in AWS config if needed
+        os.environ["AWS_REGION"] = region
+        os.environ["AWS_DEFAULT_REGION"] = region
+        
     except Exception as e:
-        print_error(f"AWS CLI check failed: {str(e)}")
-        checks_passed = False
+        print_error(f"Failed to check AWS configuration: {str(e)}")
+        return False
     
     # Check Terraform configuration
     print_info("Checking Terraform configuration...")
     try:
-        # Check Terraform version
-        tf_version = subprocess.run(["terraform", "--version"], 
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-                                 text=True, check=True)
-        print_info(f"Terraform: {tf_version.stdout.strip().split('\\n')[0]}")
+        tf_version_result = run_command(["terraform", "--version"], capture_output=True)
+        print_info(f"Terraform: {tf_version_result.stdout.split('\\n')[0]}")
         
-        # Check for required Terraform files
-        required_files = ["main.tf", "variables.tf"]
-        for file in required_files:
-            if not os.path.exists(os.path.join(terraform_project_dir, file)):
-                print_error(f"Required Terraform file {file} not found")
-                checks_passed = False
+        # Validate Terraform configuration
+        if not os.path.exists(terraform_project_dir):
+            print_error(f"Terraform directory not found: {terraform_project_dir}")
+            return False
         
-        # Check for modules
-        required_modules = ["vpc", "eks"]
-        modules_dir = os.path.join(terraform_project_dir, "modules")
-        if not os.path.exists(modules_dir):
-            print_error("Terraform modules directory not found")
-            checks_passed = False
-        else:
-            for module in required_modules:
-                if not os.path.exists(os.path.join(modules_dir, module)):
-                    print_error(f"Required Terraform module {module} not found")
-                    checks_passed = False
     except Exception as e:
-        print_error(f"Terraform check failed: {str(e)}")
-        checks_passed = False
+        print_error(f"Failed to check Terraform configuration: {str(e)}")
+        return False
     
     # Check kubectl
     print_info("Checking kubectl...")
     try:
-        kubectl_version = subprocess.run(["kubectl", "version", "--client", "--output=yaml"], 
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-                                     text=True, check=True)
-        print_info(f"kubectl client detected")
+        kubectl_version_result = run_command(["kubectl", "version", "--client", "--output=yaml"], 
+                                           capture_output=True, allow_fail=True)
+        if kubectl_version_result.returncode == 0:
+            print_info("kubectl client detected")
+        else:
+            print_warning("kubectl not found or not properly configured")
+            print_warning("You may need to install kubectl if you plan to interact with the Kubernetes cluster")
     except Exception as e:
-        print_error(f"kubectl check failed: {str(e)}")
-        checks_passed = False
+        print_warning(f"Could not check kubectl: {str(e)}")
     
     # Check Helm
     print_info("Checking Helm...")
     try:
-        helm_version = subprocess.run(["helm", "version", "--short"], 
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-                                   text=True, check=True)
-        print_info(f"Helm: {helm_version.stdout.strip()}")
+        helm_version_result = run_command(["helm", "version", "--short"], 
+                                        capture_output=True, allow_fail=True)
+        if helm_version_result.returncode == 0:
+            print_info(f"Helm: {helm_version_result.stdout.strip()}")
+        else:
+            print_warning("Helm not found or not properly configured")
+            print_warning("You may need to install Helm if you plan to deploy applications via Helm charts")
     except Exception as e:
-        print_error(f"Helm check failed: {str(e)}")
-        checks_passed = False
+        print_warning(f"Could not check Helm: {str(e)}")
     
-    # Print summary
-    if checks_passed:
-        print_success("All pre-flight checks passed!")
-    else:
-        print_warning("Some pre-flight checks failed. Proceed with caution or fix the issues before continuing.")
-        # Ask for confirmation to continue
-        try:
-            if input("Do you want to continue anyway? (y/N): ").lower() != 'y':
-                print_info("Aborting deployment")
-                sys.exit(0)
-        except KeyboardInterrupt:
-            print_info("\nAborting deployment")
-            sys.exit(0)
+    print_info("All pre-flight checks passed!")
     
-    return checks_passed
+    # Verify AWS credentials
+    try:
+        account_id_result = run_command(
+            ["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"],
+            capture_output=True
+        )
+        account_id = account_id_result.stdout.strip()
+        print_info(f"Using AWS Account: {account_id}")
+        
+        # Set region
+        print_info(f"Setting AWS region to: {region}")
+        region_result = run_command(
+            ["aws", "configure", "get", "region"],
+            capture_output=True, allow_fail=True
+        )
+        current_region = region_result.stdout.strip() if region_result.returncode == 0 else None
+        
+        if current_region != region:
+            print_warning(f"Current AWS CLI region ({current_region}) doesn't match manifest region ({region})")
+            print_info(f"Using manifest region: {region}")
+        
+    except Exception as e:
+        print_error(f"Failed to verify AWS credentials: {str(e)}")
+        return False
+    
+    return True
 
 def setup_cleanup_handler(project_dir, terraform_project_dir):
-    """Set up a cleanup handler for graceful shutdown on interruption."""
-    import atexit
-    import signal
+    """
+    Set up signal handlers to ensure proper cleanup on program interruption.
     
-    # Flag to track if we're already exiting to avoid multiple exit calls
-    is_exiting = False
+    This function creates handlers for SIGINT (Ctrl+C) and SIGTERM to ensure that
+    any temporary resources are properly cleaned up when the program is interrupted.
     
+    Args:
+        project_dir (str): Path to project directory
+        terraform_project_dir (str): Path to Terraform project directory
+        
+    Returns:
+        function: The cleanup handler function
+    """
     def cleanup_handler(signum=None, frame=None):
-        nonlocal is_exiting
+        """
+        Clean up resources when the program is interrupted.
         
-        # Avoid running cleanup multiple times
-        if is_exiting:
-            return
-        is_exiting = True
-        
-        print_info("\n")
-        print_info("=" * 80)
+        Args:
+            signum: Signal number (if called as signal handler)
+            frame: Current stack frame (if called as signal handler)
+        """
+        print_info("\n" + "=" * 80)
         print_info("CLEANING UP RESOURCES")
         print_info("=" * 80)
         
-        # Check if terraform state exists
-        state_file = os.path.join(terraform_project_dir, "terraform.tfstate")
-        if os.path.exists(state_file):
-            print_info("Found Terraform state file. Resources may have been created.")
-            print_info("You might want to run 'terraform destroy' to clean up any created resources.")
-            print_info(f"Terraform directory: {terraform_project_dir}")
+        try:
+            # Check if terraform has created any resources that need cleanup
+            terraform_state = os.path.join(terraform_project_dir, "terraform.tfstate")
+            if os.path.exists(terraform_state):
+                print_warning("Terraform state found. You might need to run 'terraform destroy' to clean up resources.")
+                print_info(f"State file: {terraform_state}")
             
-            # Save terraform directory path to a file for reference
-            with open(os.path.join(os.path.expanduser("~"), ".buildandburn_last"), "w") as f:
-                f.write(terraform_project_dir)
+            # Remove temporary files if they exist
+            temp_dirs = [
+                os.path.join(project_dir, "tmp"),
+            ]
             
-            print_info(f"Reference saved to ~/.buildandburn_last")
+            for temp_dir in temp_dirs:
+                if os.path.exists(temp_dir):
+                    print_info(f"Removing temporary directory: {temp_dir}")
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+            
+            print_info("Cleanup completed.")
+        except Exception as e:
+            print_error(f"Error during cleanup: {str(e)}")
         
         print_info("Exiting...")
-        
-        # Only call sys.exit if this wasn't called from an atexit handler
-        if signum is not None:
-            sys.exit(1)
+        sys.exit(0 if signum is None else signum)
     
-    # Register the cleanup handler for various signals
-    signal.signal(signal.SIGINT, cleanup_handler)
-    signal.signal(signal.SIGTERM, cleanup_handler)
-    
-    # Register with atexit for normal exits
-    atexit.register(cleanup_handler)
+    # Register signal handlers
+    signal.signal(signal.SIGINT, cleanup_handler)  # Ctrl+C
+    signal.signal(signal.SIGTERM, cleanup_handler)  # Termination signal
     
     return cleanup_handler
 
+def ensure_valid_state_file(state_file_path, terraform_dir=None):
+    """
+    Ensure that a Terraform state file is valid.
+    
+    This function checks if a state file exists and has proper structure.
+    If it doesn't, it attempts to fix the file.
+    
+    Args:
+        state_file_path (str): Path to the state file
+        terraform_dir (str, optional): Path to Terraform directory
+        
+    Returns:
+        bool: True if state file was fixed or is already valid, False otherwise
+    """
+    try:
+        # Check if state file exists
+        if not os.path.exists(state_file_path):
+            print_warning(f"State file not found: {state_file_path}")
+            return False
+        
+        # Check if state file is valid JSON
+        with open(state_file_path, 'r') as f:
+            try:
+                state_data = json.load(f)
+            except json.JSONDecodeError:
+                print_warning(f"State file is not valid JSON: {state_file_path}")
+                return create_valid_state_file(state_file_path, terraform_dir)
+        
+        # Check if state file has required fields
+        required_fields = ['version', 'terraform_version', 'serial', 'lineage', 'resources']
+        for field in required_fields:
+            if field not in state_data:
+                print_warning(f"State file is missing required field '{field}': {state_file_path}")
+                return create_valid_state_file(state_file_path, terraform_dir)
+        
+        return True
+    except Exception as e:
+        print_error(f"Failed to check state file: {str(e)}")
+        return False
+
+def create_valid_state_file(state_file_path, terraform_dir=None):
+    """
+    Create a properly formatted empty state file.
+    
+    This function creates a valid empty Terraform state file with proper structure.
+    
+    Args:
+        state_file_path (str): Path where the state file should be created
+        terraform_dir (str, optional): Path to Terraform directory
+        
+    Returns:
+        bool: True if state file was created successfully
+    """
+    try:
+        # Make sure parent directory exists
+        os.makedirs(os.path.dirname(state_file_path), exist_ok=True)
+        
+        # Create a minimal valid state file
+        empty_state = {
+            "version": 4,
+            "terraform_version": "1.0.0",
+            "serial": 1,
+            "lineage": str(uuid.uuid4()),
+            "outputs": {},
+            "resources": []
+        }
+        
+        with open(state_file_path, 'w') as f:
+            json.dump(empty_state, f, indent=2)
+        
+        print_success(f"Created properly formatted state file at: {state_file_path}")
+        return True
+    except Exception as e:
+        print_error(f"Failed to create state file: {str(e)}")
+        return False
+
 def validate_terraform_configuration(terraform_project_dir):
     """
-    Validate the Terraform configuration and format files.
-    Returns (True, None) if validation succeeds, (False, error_message) otherwise.
+    Validate Terraform configuration files.
+    
+    This function runs 'terraform fmt' and 'terraform validate' to check that
+    the Terraform configuration is properly formatted and syntactically correct.
+    
+    Args:
+        terraform_project_dir (str): Path to Terraform project directory
+        
+    Returns:
+        tuple: (bool, str) - Success status and error message if any
     """
-    print_color("\n===============================================================================", "34")
-    print_color("VALIDATING TERRAFORM CONFIGURATION", "34")
-    print_color("================================================================================", "34")
+    print_info("=" * 80)
+    print_info("VALIDATING TERRAFORM CONFIGURATION")
+    print_info("=" * 80)
     
-    # First check if terraform is actually installed and accessible
-    if not is_terraform_installed():
-        print_error("Terraform command not found. Please make sure Terraform is installed and available in your PATH.")
-        print_info("You can download Terraform from: https://www.terraform.io/downloads.html")
-        return False, "Terraform not installed"
-    
-    # Checking for Terraform files in the directory
-    tf_files = glob.glob(f"{terraform_project_dir}/**/*.tf", recursive=True)
-    print_info(f"Checking Terraform files...")
-    print_info(f"Found {len(tf_files)} Terraform files.")
-    
-    # Debug: Print the first few files found to verify path
-    debug_log_path = os.path.join(terraform_project_dir, "terraform_validate_debug.log")
-    with open(debug_log_path, 'w') as debug_log:
-        debug_log.write(f"Terraform directory: {terraform_project_dir}\n\n")
-        debug_log.write(f"Found {len(tf_files)} Terraform files:\n")
-        for i, tf_file in enumerate(tf_files[:5]):  # Print first 5 files
-            debug_log.write(f"{i+1}. {tf_file}\n")
-        if len(tf_files) > 5:
-            debug_log.write(f"... and {len(tf_files) - 5} more.\n\n")
-    
-    # Step 1: Check if formatting is correct using 'terraform fmt -check -recursive'
-    fmt_cmd = ["terraform", "fmt", "-check", "-recursive"]
     try:
-        fmt_result = run_command(fmt_cmd, cwd=terraform_project_dir, capture_output=True, allow_fail=True)
-        if fmt_result.returncode != 0:
-            print_warning("Terraform files have formatting issues.")
-            
-            # Auto-format
-            print_info("Automatically formatting Terraform files...")
-            auto_fmt_cmd = ["terraform", "fmt", "-recursive"]
-            fmt_fix_result = run_command(auto_fmt_cmd, cwd=terraform_project_dir, capture_output=True, allow_fail=True)
-            if fmt_fix_result.returncode == 0:
-                print_success("Terraform files have been automatically formatted.")
-            else:
-                print_warning("Failed to format Terraform files. You can manually fix formatting with: terraform fmt -recursive")
-        else:
-            print_success("Terraform files are properly formatted.")
-    except Exception as e:
-        print_warning(f"Unable to check Terraform formatting: {str(e)}")
-    
-    # Step 2: Run standard Terraform validation
-    print_info("Running standard validation...")
-    validate_cmd = ["terraform", "validate"]
-    try:
-        # Run terraform validate and capture output
-        result = subprocess.run(
-            validate_cmd,
+        # First, check if Terraform is installed
+        tf_version_result = run_command(["terraform", "--version"], capture_output=True)
+        print_info(f"Terraform version {tf_version_result.stdout.split()[1]} found.")
+        
+        # Check Terraform files
+        tf_files = glob.glob(os.path.join(terraform_project_dir, "**/*.tf"), recursive=True)
+        print_info(f"Found {len(tf_files)} Terraform files.")
+        
+        # Check formatting
+        print_info("Executing command: ['terraform', 'fmt', '-check', '-recursive']")
+        print_info(f"Working directory: {terraform_project_dir}")
+        format_result = subprocess.run(
+            ["terraform", "fmt", "-check", "-recursive"],
             cwd=terraform_project_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False
+            capture_output=True,
+            text=True
         )
         
-        # Log validation results for debugging
-        with open(debug_log_path, 'a') as debug_log:
-            debug_log.write("\nValidation Command: terraform validate\n")
-            debug_log.write(f"Return code: {result.returncode}\n")
-            debug_log.write("Standard output:\n")
-            debug_log.write(result.stdout or "(none)\n")
-            debug_log.write("\nStandard error:\n")
-            debug_log.write(result.stderr or "(none)\n")
-        
-        # Check for successful validation
-        if result.returncode == 0:
-            # Print output for transparency
-            if result.stdout:
-                print(result.stdout.strip())
-            
-            print_success("Terraform validation succeeded!")
-            return True, None
+        if format_result.returncode != 0:
+            print_warning("Terraform files are not properly formatted. Running terraform fmt...")
+            fmt_fix_result = subprocess.run(
+                ["terraform", "fmt", "-recursive"],
+                cwd=terraform_project_dir,
+                capture_output=True,
+                text=True
+            )
+            if fmt_fix_result.returncode != 0:
+                print_error("Failed to format Terraform files")
+                print_error(fmt_fix_result.stderr)
+                return False, "Failed to format Terraform files"
+            else:
+                print_success("Terraform files have been formatted.")
         else:
-            # Handle validation failure
+            print_info("Terraform files are properly formatted.")
+        
+        # Run standard validation
+        print_info("Running standard validation...")
+        validate_result = subprocess.run(
+            ["terraform", "validate"],
+            cwd=terraform_project_dir,
+            capture_output=True,
+            text=True
+        )
+        
+        if validate_result.returncode != 0:
             print_error("Terraform validation failed:")
-            if result.stdout:
-                print(result.stdout.strip())
-            if result.stderr:
-                print(result.stderr.strip())
+            print_error(validate_result.stderr)
+            
+            # Generate debug log
+            debug_log_path = os.path.join(terraform_project_dir, "terraform_validate_debug.log")
+            with open(debug_log_path, "w") as log_file:
+                log_file.write("TERRAFORM VALIDATION ERROR\n")
+                log_file.write("=" * 80 + "\n")
+                log_file.write(f"Command: terraform validate\n")
+                log_file.write(f"Working directory: {terraform_project_dir}\n")
+                log_file.write("-" * 80 + "\n")
+                log_file.write("STDOUT:\n")
+                log_file.write(validate_result.stdout)
+                log_file.write("\n" + "-" * 80 + "\n")
+                log_file.write("STDERR:\n")
+                log_file.write(validate_result.stderr)
             
             print_info(f"Debug log written to: {debug_log_path}")
-            error_msg = result.stderr if result.stderr else "Unknown validation error"
-            return False, error_msg
+            
+            # Try to fix common issues
+            fixed = False
+            if "provider configuration is required" in validate_result.stderr:
+                print_info("Attempting to fix missing provider configuration...")
+                if add_provider_config(terraform_project_dir):
+                    fixed = True
+            
+            if fixed:
+                print_info("Trying validation again after fixes...")
+                revalidate_result = subprocess.run(
+                    ["terraform", "validate"],
+                    cwd=terraform_project_dir,
+                    capture_output=True,
+                    text=True
+                )
+                
+                if revalidate_result.returncode != 0:
+                    print_error("Terraform validation still failed after fixes:")
+                    print_error(revalidate_result.stderr)
+                    return False, "Terraform validation failed even after fixes"
+                else:
+                    print_success("Terraform validation succeeded after fixes!")
+            else:
+                return False, "Terraform validation failed"
+        else:
+            print_success(validate_result.stdout.strip())
+        
+        print_success("Terraform validation succeeded!")
+        return True, ""
+    
     except Exception as e:
         print_error(f"Error validating Terraform configuration: {str(e)}")
         traceback.print_exc()
         return False, str(e)
 
 def generate_resource_summary(manifest, tf_vars, terraform_project_dir):
-    """Generate a summary of resources to be provisioned and estimated costs."""
+    """
+    Generate a summary of resources that will be created and their estimated costs.
+    
+    This function analyzes the Terraform configuration and manifest to provide
+    a summary of AWS resources that will be provisioned and their approximate costs.
+    
+    Args:
+        manifest (dict): The parsed manifest containing configuration
+        tf_vars (dict): Terraform variables prepared from the manifest
+        terraform_project_dir (str): Path to Terraform project directory
+        
+    Returns:
+        tuple: (list of resources, float of total hourly cost)
+    """
+    # Initialize resource list and cost
+    resources = []
+    total_cost_per_hour = 0.0
+    
+    # Helper function to add a resource to the summary
+    def add_resource(type_name, name, count, cost_per_hour):
+        nonlocal total_cost_per_hour
+        resources.append({
+            "type": type_name,
+            "name": name,
+            "count": count,
+            "cost_per_hour": cost_per_hour
+        })
+        total_cost_per_hour += cost_per_hour * count
+    
+    # EKS Cluster - always included
+    add_resource(
+        "EKS Cluster", 
+        f"{tf_vars['project_name']}-{tf_vars['env_id']}", 
+        1, 
+        0.10  # Approximate cost per hour for EKS control plane
+    )
+    
+    # EKS Nodes based on configuration
+    instance_type = tf_vars['eks_instance_types'][0]
+    node_count = tf_vars['eks_node_min']
+    
+    # Approximate cost mapping for common instance types
+    instance_costs = {
+        "t3.small": 0.02,
+        "t3.medium": 0.04,
+        "t3.large": 0.08,
+        "m5.large": 0.10,
+        "m5.xlarge": 0.20,
+        "c5.large": 0.09,
+        "c5.xlarge": 0.18,
+        "r5.large": 0.13,
+        "r5.xlarge": 0.26
+    }
+    
+    instance_cost = instance_costs.get(instance_type, 0.04)  # Default to t3.medium cost
+    add_resource(
+        "EC2 Instance",
+        f"eks-node-{instance_type}",
+        node_count,
+        instance_cost
+    )
+    
+    # Add database if included
+    if 'database' in tf_vars.get('dependencies', []):
+        db_instance_class = tf_vars.get('db_instance_class', 'db.t3.micro')
+        db_storage = tf_vars.get('db_allocated_storage', 20)
+        
+        # Approximate cost mapping for common RDS instance classes
+        db_costs = {
+            "db.t3.micro": 0.02,
+            "db.t3.small": 0.04,
+            "db.t3.medium": 0.08,
+            "db.m5.large": 0.15,
+            "db.m5.xlarge": 0.30
+        }
+        
+        db_cost = db_costs.get(db_instance_class, 0.02)  # Default to micro cost
+        storage_cost = 0.115 * db_storage / 30 / 24  # Approximate cost per GB per hour
+        
+        add_resource(
+            "RDS Database",
+            f"{tf_vars['project_name']}-{tf_vars['env_id']}-db",
+            1,
+            db_cost + storage_cost
+        )
+    
+    # Add MQ broker if included
+    if 'queue' in tf_vars.get('dependencies', []):
+        mq_instance_type = tf_vars.get('mq_instance_type', 'mq.t3.micro')
+        
+        # Approximate cost mapping for common MQ instance types
+        mq_costs = {
+            "mq.t3.micro": 0.04,
+            "mq.t3.small": 0.08,
+            "mq.m5.large": 0.25
+        }
+        
+        mq_cost = mq_costs.get(mq_instance_type, 0.04)  # Default to micro cost
+        
+        add_resource(
+            "MQ Broker",
+            f"{tf_vars['project_name']}-{tf_vars['env_id']}-mq",
+            1,
+            mq_cost
+        )
+    
+    # Add ElastiCache if included
+    if 'redis' in tf_vars.get('dependencies', []):
+        redis_node_type = tf_vars.get('redis_node_type', 'cache.t3.micro')
+        redis_cluster_size = tf_vars.get('redis_cluster_size', 1)
+        
+        # Approximate cost mapping for common ElastiCache node types
+        redis_costs = {
+            "cache.t3.micro": 0.02,
+            "cache.t3.small": 0.04,
+            "cache.t3.medium": 0.08,
+            "cache.m5.large": 0.15
+        }
+        
+        redis_cost = redis_costs.get(redis_node_type, 0.02)  # Default to micro cost
+        
+        add_resource(
+            "ElastiCache Redis",
+            f"{tf_vars['project_name']}-{tf_vars['env_id']}-redis",
+            redis_cluster_size,
+            redis_cost
+        )
+    
+    # Add MSK if included
+    if 'kafka' in tf_vars.get('dependencies', []):
+        kafka_instance_type = tf_vars.get('kafka_instance_type', 'kafka.t3.small')
+        kafka_broker_count = tf_vars.get('kafka_broker_count', 2)
+        
+        # Approximate cost mapping for common MSK instance types
+        kafka_costs = {
+            "kafka.t3.small": 0.06,
+            "kafka.m5.large": 0.19,
+            "kafka.m5.xlarge": 0.37
+        }
+        
+        kafka_cost = kafka_costs.get(kafka_instance_type, 0.06)  # Default to small cost
+        
+        add_resource(
+            "MSK Kafka",
+            f"{tf_vars['project_name']}-{tf_vars['env_id']}-kafka",
+            kafka_broker_count,
+            kafka_cost
+        )
+    
+    # Print the resource summary
     print_info("=" * 80)
     print_info("RESOURCE SUMMARY")
     print_info("=" * 80)
     
-    # Default resource costs (very rough estimates)
-    resource_costs = {
-        "eks_cluster": 0.10,  # $/hour for EKS control plane
-        "ec2_instance": {
-            "t3.medium": 0.0416,  # $/hour
-            "t3.large": 0.0832,   # $/hour
-            "t3.xlarge": 0.1664,  # $/hour
-        },
-        "rds_instance": {
-            "db.t3.small": 0.034,   # $/hour
-            "db.t3.medium": 0.068,  # $/hour
-            "db.t3.large": 0.136,   # $/hour
-        },
-        "mq_instance": {
-            "mq.t3.micro": 0.028,   # $/hour
-            "mq.t3.small": 0.056,   # $/hour
-        }
-    }
-    
-    total_cost_per_hour = 0
-    resources = []
-    
-    # EKS Cluster
-    resources.append({
-        "type": "EKS Cluster",
-        "name": f"{tf_vars['project_name']}-{tf_vars['env_id']}",
-        "count": 1,
-        "cost_per_hour": resource_costs["eks_cluster"]
-    })
-    total_cost_per_hour += resource_costs["eks_cluster"]
-    
-    # EC2 Instances for EKS
-    node_min = tf_vars.get("eks_node_min", 1)
-    instance_types = tf_vars.get("eks_instance_types", ["t3.medium"])
-    instance_type = instance_types[0] if instance_types else "t3.medium"
-    instance_cost = resource_costs["ec2_instance"].get(instance_type, 0.05)
-    resources.append({
-        "type": "EC2 Instance",
-        "name": f"eks-node-{instance_type}",
-        "count": node_min,
-        "cost_per_hour": instance_cost * node_min
-    })
-    total_cost_per_hour += instance_cost * node_min
-    
-    # RDS Instance (if requested)
-    if "database" in tf_vars.get("dependencies", []):
-        db_instance_class = tf_vars.get("db_instance_class", "db.t3.small")
-        db_cost = resource_costs["rds_instance"].get(db_instance_class, 0.04)
-        resources.append({
-            "type": "RDS Instance",
-            "name": f"{tf_vars['project_name']}-db",
-            "count": 1,
-            "cost_per_hour": db_cost
-        })
-        total_cost_per_hour += db_cost
-    
-    # MQ Instance (if requested)
-    if "queue" in tf_vars.get("dependencies", []):
-        mq_instance_type = tf_vars.get("mq_instance_type", "mq.t3.micro")
-        mq_cost = resource_costs["mq_instance"].get(mq_instance_type, 0.03)
-        resources.append({
-            "type": "MQ Instance",
-            "name": f"{tf_vars['project_name']}-mq",
-            "count": 1, 
-            "cost_per_hour": mq_cost
-        })
-        total_cost_per_hour += mq_cost
-    
-    # Print resources table
+    # Format like a table
     print_info(f"{'Resource Type':<20} {'Name':<30} {'Count':<10} {'Est. Cost/Hour':<15}")
     print_info("-" * 75)
+    
     for resource in resources:
         print_info(
-            f"{resource['type']:<20} "
-            f"{resource['name']:<30} "
-            f"{resource['count']:<10} "
-            f"${resource['cost_per_hour']:.2f}/hr"
+            f"{resource['type']:<20} {resource['name']:<30} {resource['count']:<10} "
+            f"${resource['cost_per_hour'] * resource['count']:.2f}/hr"
         )
-    print_info("-" * 75)
-    print_info(f"{'Total Estimated Cost':<60} ${total_cost_per_hour:.2f}/hr")
-    print_info(f"{'Monthly Estimate (30 days)':<60} ${total_cost_per_hour * 24 * 30:.2f}")
     
-    print_warning("Cost estimates are approximate and may vary based on AWS pricing changes and actual usage.")
-    print_warning("Additional costs may be incurred for data transfer, storage, and other AWS services.")
+    print_info("-" * 75)
+    print_info(f"{'Total Estimated Cost':<50} ${total_cost_per_hour:.2f}/hr")
+    print_info(f"{'Monthly Estimate (30 days)':<50} ${total_cost_per_hour * 24 * 30:.2f}")
+    print_info("Cost estimates are approximate and may vary based on AWS pricing changes and actual usage.")
+    print_info("Additional costs may be incurred for data transfer, storage, and other AWS services.")
     
     return resources, total_cost_per_hour
 
 def provision_infrastructure(manifest, env_id, terraform_dir, args=None):
-    """Provision infrastructure using Terraform based on the manifest."""
+    """
+    Provision infrastructure using Terraform based on the manifest configuration.
     
+    This is the core function that handles the entire infrastructure provisioning process:
+    1. Validates the manifest and ensures it contains required fields
+    2. Creates a dedicated project directory for this environment
+    3. Copies Terraform configuration files
+    4. Runs pre-flight checks to verify AWS credentials and configuration
+    5. Prepares Terraform variables based on the manifest
+    6. Validates Terraform modules against manifest requirements
+    7. Generates a resource summary with cost estimates
+    8. Initializes Terraform and handles provider configurations
+    9. Runs Terraform validation
+    10. Executes Terraform plan and apply to create infrastructure
+    11. Saves environment information for future reference
+    
+    The function implements sophisticated error handling, automatic recovery mechanisms,
+    and detailed logging to handle various failure scenarios.
+    
+    Args:
+        manifest (dict): The parsed manifest containing configuration
+        env_id (str): Unique environment ID for this deployment
+        terraform_dir (str): Path to base Terraform directory
+        args (argparse.Namespace, optional): Command-line arguments
+            - auto_approve: Skip confirmation prompts
+            - skip_module_confirmation: Skip confirmation for module validation
+            
+    Returns:
+        tuple: (project_dir, tf_output)
+            - project_dir: Path to the project directory for this environment
+            - tf_output: Dictionary of Terraform outputs
+    """
+    # Check if manifest is valid
     if manifest is None:
         print_error("Manifest is empty or invalid. Please provide a valid manifest file.")
         return None, {}
@@ -838,14 +1079,16 @@ def provision_infrastructure(manifest, env_id, terraform_dir, args=None):
             auto_approve = False
             skip_module_confirmation = False
         args = DefaultArgs()
-        
+    
     print_info("=" * 80)
     print_info("PROVISIONING INFRASTRUCTURE")
     print_info("=" * 80)
     print_info(f"Environment ID: {env_id}")
     print_info(f"Project name: {manifest['name']}")
-    print_info(f"Region: {manifest.get('region', 'us-west-2')}")
-    print_info(f"Terraform directory: {terraform_dir}")
+    
+    # Get region from manifest or use default
+    region = manifest.get('region', 'us-west-2')
+    print_info(f"Region: {region}")
     
     # Create a project directory
     project_dir = os.path.join(os.path.expanduser("~"), ".buildandburn", env_id)
@@ -2717,26 +2960,45 @@ def analyze_terraform_errors(error_output):
     }
 
 def cmd_up(args):
-    """Create a new build-and-burn environment."""
+    """
+    Handle the 'up' command to create/update infrastructure and deploy services.
+    
+    This function orchestrates the entire build process:
+    1. Loads the manifest file
+    2. Generates a unique environment ID if not provided
+    3. Provisions infrastructure using Terraform
+    4. Deploys services to Kubernetes
+    5. Displays access information for the deployed services
+    
+    Args:
+        args (argparse.Namespace): Command-line arguments including:
+            - manifest (str): Path to the manifest file
+            - env_id (str, optional): Environment ID
+            - auto_approve (bool): Skip confirmation prompts
+            - no_generate_k8s (bool): Skip generating Kubernetes resources
+            - dry_run (bool): Skip actual deployment
+            - skip_module_confirmation (bool): Skip confirmation for module validation
+            
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    manifest_path = args.manifest
     print_info("=" * 80)
     print_info("BUILD AND BURN - ENVIRONMENT CREATION")
     print_info("=" * 80)
     
-    # Generate or use provided environment ID
-    env_id = args.env_id or generate_env_id()
+    # Generate or use environment ID
+    env_id = args.env_id if args.env_id else generate_env_id()
     print_info(f"Using environment ID: {env_id}")
     
     # Load manifest
-    print_info(f"Loading manifest file: {args.manifest}")
-    try:
-        manifest = load_manifest(args.manifest)
-        print_info("Manifest loaded successfully:")
-        print(yaml.dump(manifest, default_flow_style=False))
-    except Exception as e:
-        print_error(f"Failed to load manifest file: {str(e)}")
+    print_info(f"Loading manifest file: {manifest_path}")
+    manifest = load_manifest(manifest_path)
+    if not manifest:
+        print_error("Failed to load manifest file")
         return False
     
-    # Get project directories
+    # Get directory paths
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)
     terraform_dir = os.path.join(project_root, "terraform")
@@ -2747,1260 +3009,277 @@ def cmd_up(args):
     print_info(f"Terraform directory: {terraform_dir}")
     print_info(f"Kubernetes directory: {k8s_dir}")
     
-    # Enable debug logging
-    os.environ['BUILDANDBURN_DEBUG'] = '1'
+    # Run prerequisite checks
+    if not check_prerequisites():
+        print_error("Prerequisite check failed")
+        return False
     
-    # Check if this is a dry run
-    if hasattr(args, 'dry_run') and args.dry_run:
-        print_info("=" * 80)
-        print_info("DRY RUN MODE - Validating configuration only")
-        print_info("=" * 80)
-        
-        # Validate terraform configuration
-        terraform_project_dir = os.path.join(terraform_dir)
-        if not os.path.exists(terraform_project_dir):
-            print_error(f"Terraform project directory not found: {terraform_project_dir}")
-            return False
-        
-        # Run preflight checks
-        preflight_success = run_preflight_checks(manifest, env_id, terraform_project_dir)
-        if not preflight_success:
-            print_error("Preflight checks failed.")
-            return False
-            
-        # Check Kubernetes resources
-        try:
-            # Determine whether to auto-generate Kubernetes resources
-            auto_generate = not args.no_generate_k8s if hasattr(args, 'no_generate_k8s') else True
-            
-            # Check if Kubernetes resources are available
-            k8s_resources_path = ensure_k8s_resources(manifest, k8s_dir, os.getcwd(), auto_generate=False)
-            if k8s_resources_path:
-                print_success(f"Kubernetes resources found at: {k8s_resources_path}")
-            elif auto_generate:
-                print_info("Kubernetes resources will be generated during deployment")
-            else:
-                print_warning("No Kubernetes resources found and auto-generation is disabled")
-                
-            print_info("=" * 80)
-            print_success("DRY RUN VALIDATION SUCCESSFUL - Configuration looks good")
-            print_info("=" * 80)
-            return True
-        except Exception as e:
-            print_error(f"Kubernetes resources validation failed: {str(e)}")
-            return False
-    
-    # Provision infrastructure - pass the skip_module_confirmation flag
+    # Provision infrastructure
     project_dir, tf_output = provision_infrastructure(manifest, env_id, terraform_dir, args=args)
-    
-    # Check if infrastructure provisioning was successful
-    if not project_dir or not tf_output:
-        print_error("Infrastructure provisioning failed.")
+    if not project_dir:
+        print_error("Infrastructure provisioning failed")
         return False
     
-    try:
-        # Determine whether to auto-generate Kubernetes resources
-        auto_generate = not args.no_generate_k8s if hasattr(args, 'no_generate_k8s') else True
-        
-        # Ensure Kubernetes resources are available, generate if needed and if auto_generate is enabled
-        k8s_dir = ensure_k8s_resources(manifest, k8s_dir, project_dir, auto_generate)
-        print_info(f"Using Kubernetes resources from: {k8s_dir}")
-        
-        # Deploy to Kubernetes
-        deploy_success = deploy_to_kubernetes(manifest, tf_output, k8s_dir, project_dir)
-        if not deploy_success:
-            print_error("Kubernetes deployment failed.")
-            print_warning("The infrastructure has been provisioned, but application deployment failed.")
-            print_info(f"You can retry the deployment or destroy the infrastructure with: buildandburn down {env_id}")
-            return False
-    
-        # Get and print access information
-        kubeconfig_path = os.path.join(project_dir, "kubeconfig")
-        namespace = f"bb-{manifest['name']}"
-        access_info = get_access_info(kubeconfig_path, namespace, tf_output)
-        
-        print_info("=" * 80)
-        print_success(f"ENVIRONMENT CREATED SUCCESSFULLY")
-        print_info("=" * 80)
-        print_success(f"Environment ID: {env_id}")
-        print_info("Access Information:")
-        print(json.dumps(access_info, indent=2))
-        
-        # Prominently display the primary URL if available
-        if "primary_url" in access_info:
-            print_info("=" * 80)
-            print_success(f"APPLICATION URL: {access_info['primary_url']}")
-            print_info("=" * 80)
-        elif access_info["ingresses"]:
-            # Show the first ingress URL
-            first_ingress = list(access_info["ingresses"].keys())[0]
-            print_info("=" * 80)
-            print_success(f"APPLICATION URL: {access_info['ingresses'][first_ingress]}")
-            print_info("=" * 80)
-        elif any(url.startswith("http://") for url in access_info["services"].values()):
-            # Find the first service with an HTTP URL
-            for svc_name, url in access_info["services"].items():
-                if url.startswith("http://"):
-                    print_info("=" * 80)
-                    print_success(f"APPLICATION URL: {url}")
-                    print_info("=" * 80)
-                    break
-        
-        print_info(f"\nTo destroy this environment, run: buildandburn down {env_id}")
-        
-        # Return success
+    # Skip Kubernetes deployment if only infrastructure was requested
+    if args.infrastructure_only:
+        print_info("Infrastructure provisioning complete. Skipping Kubernetes deployment per --infrastructure-only flag.")
+        get_access_info(os.path.join(project_dir, "kubeconfig"), f"bb-{manifest['name']}", tf_output)
         return True
-    except Exception as e:
-        print_error(f"Failed during environment setup: {str(e)}")
-        print_warning("Infrastructure may have been provisioned but deployment failed.")
-        print_info(f"You can destroy this environment with: buildandburn down {env_id}")
-        return False
-
-def cmd_down(args):
-    """Destroy a build-and-burn environment."""
-    env_id = args.env_id
-    print_info(f"Destroying environment with ID: {env_id}")
     
-    # Get environment directory
-    env_dir = os.path.join(os.path.expanduser("~"), ".buildandburn", env_id)
-    if not os.path.exists(env_dir):
-        print_error(f"Environment with ID {env_id} not found.")
-        return False
-    
-    # Load environment info
-    env_info_file = os.path.join(env_dir, "env_info.json")
-    if not os.path.exists(env_info_file):
-        print_error(f"Environment info file not found for ID {env_id}.")
-        return False
-    
-    with open(env_info_file, 'r') as f:
-        env_info = json.load(f)
-    
-    # Get terraform directory
-    terraform_dir = os.path.join(env_dir, "terraform")
-    if not os.path.exists(terraform_dir):
-        print_error(f"Terraform directory not found for environment ID {env_id}.")
-        return False
-    
-    # Verify state file exists
-    state_file = env_info.get("state_file")
-    if not state_file or not os.path.exists(state_file):
-        # First check in the terraform/state directory
-        state_file = os.path.join(terraform_dir, "state", "terraform.tfstate")
-        if not os.path.exists(state_file):
-            # Then check directly in the terraform directory
-            state_file = os.path.join(terraform_dir, "terraform.tfstate")
-            if not os.path.exists(state_file):
-                # Finally check in the legacy location
-                state_dir = os.path.join(env_dir, "terraform_state")
-                state_file = os.path.join(state_dir, "terraform.tfstate")
-                if not os.path.exists(state_file):
-                    print_warning(f"State file not found. Trying to use default state.")
-                    state_file = os.path.join(terraform_dir, "state", "terraform.tfstate")
-                    os.makedirs(os.path.dirname(state_file), exist_ok=True)
-    
-    print_info(f"Using state file: {state_file}")
-    
-    # Check state file is valid and fix if needed
-    if ensure_valid_state_file(state_file, terraform_dir):
-        print_info("State file was in invalid format and has been fixed.")
-    
-    # Check state file contents
-    try:
-        with open(state_file, 'r') as f:
-            state_content = f.read()
-            if state_content.strip() == "{}" or state_content.strip() == "":
-                print_warning("State file appears to be empty. No resources to destroy.")
-                if input("Continue anyway? (y/N): ").lower() != 'y':
-                    print_info("Exiting.")
-                    return False
-    except Exception as e:
-        print_warning(f"Could not read state file: {str(e)}")
-    
-    # Check if there's a tfvars file
-    tf_vars_file = os.path.join(terraform_dir, "terraform.tfvars.json")
-    if not os.path.exists(tf_vars_file):
-        # Try legacy location
-        tf_vars_file = os.path.join(env_dir, "terraform.tfvars.json")
-        if not os.path.exists(tf_vars_file):
-            print_warning(f"Terraform variables file not found. Will attempt to destroy without it.")
-            tf_vars_file = None
-    
-    # Create destroy plan first
-    destroy_plan_file = os.path.join(env_dir, "terraform.destroy.plan")
-    print_info("Creating destruction plan...")
-    
-    # Set up the destroy log file
-    tf_destroy_log = os.path.join(env_dir, "terraform_destroy.log")
-    print_info(f"Logging detailed Terraform destroy output to: {tf_destroy_log}")
-    
-    # Create a separate raw output log file for the destroy process
-    raw_destroy_log = os.path.join(env_dir, "terraform_destroy_raw.log")
-    
-    # First create a destroy plan
-    try:
-        with open(tf_destroy_log, 'w') as log_file:
-            log_file.write("=" * 80 + "\n")
-            log_file.write("TERRAFORM DESTROY LOG\n")
-            log_file.write("=" * 80 + "\n")
-            log_file.write(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            log_file.write(f"Environment ID: {env_id}\n")
-            log_file.write(f"Project Name: {env_info.get('project_name', 'Unknown')}\n")
-            log_file.write(f"State File: {state_file}\n\n")
-            
-            # Verify terraform is initialized with the correct state
-            print_info("Ensuring Terraform is initialized with the correct state...")
-            log_file.write("Ensuring Terraform is initialized with the correct state...\n")
-            
-            # Create or update backend override to point to the state file
-            backend_file = os.path.join(terraform_dir, "backend_override.tf")
-            with open(backend_file, 'w') as f:
-                f.write(f"""
-# Override backend to use the existing state file
-terraform {{
-  backend "local" {{
-    path = "{state_file}"
-  }}
-}}
-""")
-            
-            # Initialize terraform with the backend config
-            init_cmd = "terraform init -reconfigure"
-            print_info(f"Running: {init_cmd}")
-            log_file.write(f"Initializing Terraform: {init_cmd}\n")
-            init_process = subprocess.run(
-                init_cmd,
-                cwd=terraform_dir,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            
-            if init_process.returncode != 0:
-                print_error("Failed to initialize Terraform with state file.")
-                print_error(init_process.stderr)
-                log_file.write(f"Init failed: {init_process.stderr}\n")
-                print_warning("Will try to continue with destroy plan, but it may fail.")
-            else:
-                print_success("Terraform initialized successfully with state file.")
-                log_file.write("Terraform initialized successfully.\n")
-            
-            # Create the destroy plan
-            plan_cmd = f"terraform plan -destroy -out='{destroy_plan_file}'"
-            if tf_vars_file:
-                plan_cmd += f" -var-file='{tf_vars_file}'"
-                
-            print_info(f"Running: {plan_cmd}")
-            log_file.write(f"Creating destroy plan: {plan_cmd}\n")
-            
-            # Execute the plan command
-            plan_process = subprocess.Popen(
-                plan_cmd,
-                cwd=terraform_dir,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            
-            # Process output in real-time
-            for line in plan_process.stdout:
-                sys.stdout.write(line)
-                log_file.write(line)
-            
-            # Wait for completion and check for errors
-            plan_process.wait()
-            stderr_output = plan_process.stderr.read()
-            
-            if stderr_output:
-                print_error("Terraform destroy plan encountered errors:")
-                print_error(stderr_output)
-                log_file.write("\nERROR OUTPUT:\n")
-                log_file.write(stderr_output)
-            
-            if plan_process.returncode != 0:
-                print_error("Failed to create destroy plan.")
-                log_file.write("Failed to create destroy plan.\n")
-                print_warning("Proceeding with direct destroy command...")
-                log_file.write("Proceeding with direct destroy command...\n")
-                
-                # If plan fails, use direct destroy
-                if not args.auto_approve and input("Do you want to proceed with destroying resources? (y/N): ").lower() != 'y':
-                    print_info("Destroy cancelled by user.")
-                    return False
-                
-                # Run destroy directly with auto-approve
-                destroy_cmd = "terraform destroy -auto-approve"
-                if tf_vars_file:
-                    destroy_cmd += f" -var-file='{tf_vars_file}'"
-                
-                print_info(f"Running: {destroy_cmd}")
-                log_file.write(f"Running direct destroy: {destroy_cmd}\n")
-                
-                # Execute direct destroy
-                destroy_process = subprocess.Popen(
-                    destroy_cmd,
-                    cwd=terraform_dir,
-                    shell=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                
-                # Setup for monitoring with timeout
-                start_time = time.time()
-                last_activity_time = start_time
-                last_progress_update = start_time
-                timeout = CONFIG["TERRAFORM_DESTROY_TIMEOUT"]
-                destroying_resources = set()
-                
-                print_info(f"Terraform destroy timeout set to {timeout} seconds")
-                
-                # Process output with timeout monitoring
-                while True:
-                    # Check for timeout
-                    current_time = time.time()
-                    elapsed_time = current_time - start_time
-                    
-                    # Provide periodic progress updates
-                    if current_time - last_progress_update > CONFIG["PROGRESS_UPDATE_INTERVAL"]:
-                        print_info(f"Terraform destroy in progress... ({int(elapsed_time)}s elapsed)")
-                        if destroying_resources:
-                            print_info(f"Current resources being destroyed: {', '.join(destroying_resources)}")
-                        last_progress_update = current_time
-                    
-                    # Check if process finished
-                    if destroy_process.poll() is not None:
-                        break
-                    
-                    # Check for timeout
-                    if elapsed_time > timeout:
-                        # Try to intelligently handle the timeout
-                        time_since_last_activity = current_time - last_activity_time
-                        if time_since_last_activity > 300:  # No activity for 5 minutes
-                            # Check for specific resources that might be stuck
-                            stuck_resources = list(destroying_resources)
-                            
-                            if stuck_resources:
-                                print_warning(f"The following resources appear to be stuck: {', '.join(stuck_resources)}")
-                                
-                                # For some resources, we know retrying can help
-                                retry_resources = [r for r in stuck_resources if any(x in r.lower() for x in ["eks", "kafka", "mq", "rds", "iam"])]
-                                
-                                if retry_resources and elapsed_time < (timeout * 0.8):
-                                    print_info(f"Attempting to continue with {', '.join(retry_resources)}...")
-                                    # Reset activity timer to give more time
-                                    last_activity_time = current_time
-                                    continue
-                        
-                        # If we reach here, we need to terminate
-                        print_error(f"Terraform destroy timed out after {timeout} seconds")
-                        apply_process.terminate()
-                        try:
-                            apply_process.wait(timeout=10)
-                        except subprocess.TimeoutExpired:
-                            apply_process.kill()
-                        
-                        log_file.write(f"\nProcess timed out after {timeout} seconds\n")
-                        print_warning("Some resources may still exist in your AWS account.")
-                        print_info("You may need to manually clean up resources.")
-                        return False
-                    
-                    # Check if output is available (non-blocking)
-                    line = ""
-                    try:
-                        line = destroy_process.stdout.readline()
-                    except Exception as e:
-                        print_warning(f"Error reading terraform output: {str(e)}")
-                        time.sleep(1)
-                        continue
-                    
-                    if not line:
-                        # No output available, wait a bit
-                        time.sleep(0.1)
-                        continue
-                    
-                    # Got output, update last activity time
-                    last_activity_time = current_time
-                    
-                    # Write to logs
-                    sys.stdout.write(line)
-                    log_file.write(line)
-                    
-                    # Track resources being destroyed
-                    if "Destroying..." in line:
-                        resource_type = line.split("Destroying...")[0].strip()
-                        if resource_type.startswith('"') and resource_type.endswith('"'):
-                            resource_type = resource_type[1:-1]
-                        destroying_resources.add(resource_type)
-                    elif "Destruction complete" in line:
-                        for rt in destroying_resources.copy():
-                            if rt in line:
-                                destroying_resources.remove(rt)
-                                break
-                
-                # Process has finished or timed out
-                elapsed_time = time.time() - start_time
-                print_info(f"Terraform destroy process finished after {int(elapsed_time)}s")
-                
-                # Get stderr content
-                direct_stderr = destroy_process.stderr.read()
-                
-                if direct_stderr:
-                    print_error("Terraform destroy encountered errors:")
-                    print_error(direct_stderr)
-                    log_file.write("\nDIRECT DESTROY ERROR OUTPUT:\n")
-                    log_file.write(direct_stderr)
-                
-                if destroy_process.returncode != 0:
-                    print_error("Terraform destroy failed.")
-                    log_file.write("Terraform destroy failed.\n")
-                    print_warning("Some resources may still exist in your AWS account.")
-                    print_info("You may need to manually clean up resources.")
-                    return False
-                else:
-                    print_success("Terraform destroy completed successfully.")
-                    log_file.write("Terraform destroy completed successfully.\n")
-            else:
-                # Plan succeeded, now confirm and apply
-                if not args.auto_approve and input("Do you want to proceed with destroying resources? (y/N): ").lower() != 'y':
-                    print_info("Destroy cancelled by user.")
-                    return False
-                
-                # Apply the destroy plan
-                print_info("Applying destroy plan...")
-                log_file.write("Applying destroy plan...\n")
-                
-                apply_cmd = f"terraform apply '{destroy_plan_file}'"
-                print_info(f"Running: {apply_cmd}")
-                log_file.write(f"Executing: {apply_cmd}\n")
-                
-                # Execute apply with timeout
-                apply_process = subprocess.Popen(
-                    apply_cmd,
-                    cwd=terraform_dir,
-                    shell=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                
-                # Setup for monitoring with timeout
-                start_time = time.time()
-                last_activity_time = start_time
-                last_progress_update = start_time
-                timeout = CONFIG["TERRAFORM_DESTROY_TIMEOUT"]
-                destroying_resources = set()
-                
-                print_info(f"Terraform destroy timeout set to {timeout} seconds")
-                
-                # Process output with timeout monitoring
-                while True:
-                    # Check for timeout
-                    current_time = time.time()
-                    elapsed_time = current_time - start_time
-                    
-                    # Provide periodic progress updates
-                    if current_time - last_progress_update > CONFIG["PROGRESS_UPDATE_INTERVAL"]:
-                        print_info(f"Terraform destroy in progress... ({int(elapsed_time)}s elapsed)")
-                        if destroying_resources:
-                            print_info(f"Current resources being destroyed: {', '.join(destroying_resources)}")
-                        last_progress_update = current_time
-                    
-                    # Check if process finished
-                    if apply_process.poll() is not None:
-                        break
-                    
-                    # Check for timeout
-                    if elapsed_time > timeout:
-                        # Try to intelligently handle the timeout
-                        time_since_last_activity = current_time - last_activity_time
-                        if time_since_last_activity > 300:  # No activity for 5 minutes
-                            # Check for specific resources that might be stuck
-                            stuck_resources = list(destroying_resources)
-                            
-                            if stuck_resources:
-                                print_warning(f"The following resources appear to be stuck: {', '.join(stuck_resources)}")
-                                
-                                # For some resources, we know retrying can help
-                                retry_resources = [r for r in stuck_resources if any(x in r.lower() for x in ["eks", "kafka", "mq", "rds", "iam"])]
-                                
-                                if retry_resources and elapsed_time < (timeout * 0.8):
-                                    print_info(f"Attempting to continue with {', '.join(retry_resources)}...")
-                                    # Reset activity timer to give more time
-                                    last_activity_time = current_time
-                                    continue
-                        
-                        # If we reach here, we need to terminate
-                        print_error(f"Terraform destroy timed out after {timeout} seconds")
-                        apply_process.terminate()
-                        try:
-                            apply_process.wait(timeout=10)
-                        except subprocess.TimeoutExpired:
-                            apply_process.kill()
-                        
-                        log_file.write(f"\nProcess timed out after {timeout} seconds\n")
-                        print_warning("Some resources may still exist in your AWS account.")
-                        print_info("You may need to manually clean up resources.")
-                        return False
-                    
-                    # Check if output is available (non-blocking)
-                    line = ""
-                    try:
-                        line = apply_process.stdout.readline()
-                    except Exception as e:
-                        print_warning(f"Error reading terraform output: {str(e)}")
-                        time.sleep(1)
-                        continue
-                    
-                    if not line:
-                        # No output available, wait a bit
-                        time.sleep(0.1)
-                        continue
-                    
-                    # Got output, update last activity time
-                    last_activity_time = current_time
-                    
-                    # Write to logs
-                    sys.stdout.write(line)
-                    log_file.write(line)
-                    
-                    # Track resources being destroyed
-                    if "Destroying..." in line:
-                        resource_type = line.split("Destroying...")[0].strip()
-                        if resource_type.startswith('"') and resource_type.endswith('"'):
-                            resource_type = resource_type[1:-1]
-                        destroying_resources.add(resource_type)
-                    elif "Destruction complete" in line:
-                        for rt in destroying_resources.copy():
-                            if rt in line:
-                                destroying_resources.remove(rt)
-                                break
-                
-                # Process has finished or timed out
-                elapsed_time = time.time() - start_time
-                print_info(f"Terraform destroy process finished after {int(elapsed_time)}s")
-                
-                # Check stderr for errors
-                apply_stderr = apply_process.stderr.read()
-                
-                if apply_stderr:
-                    print_error("Terraform destroy encountered errors:")
-                    print_error(apply_stderr)
-                    log_file.write("\nAPPLY ERROR OUTPUT:\n")
-                    log_file.write(apply_stderr)
-                
-                if apply_process.returncode != 0:
-                    print_error("Terraform destroy failed.")
-                    log_file.write("Terraform destroy failed.\n")
-                    print_warning("Some resources may still exist in your AWS account.")
-                    print_info("You may need to manually clean up resources.")
-                    return False
-                else:
-                    print_success("Terraform destroy completed successfully.")
-                    log_file.write("Terraform destroy completed successfully.\n")
-    except Exception as e:
-        print_error(f"Error during destroy process: {str(e)}")
-        print_warning("Some resources may still exist in your AWS account.")
-        print_info("You may need to manually clean up resources.")
-        return False
-    
-    # Clean up local files if requested
-    if not args.keep_local:
-        print_info("Cleaning up local environment files...")
-        try:
-            shutil.rmtree(env_dir)
-            print_success("Local environment files removed.")
-        except Exception as e:
-            print_warning(f"Failed to clean up local environment files: {str(e)}")
+    # Deploy to Kubernetes unless skipped
+    if not args.no_deploy_k8s:
+        if not deploy_to_kubernetes(manifest, tf_output, k8s_dir, project_dir):
+            print_error("Kubernetes deployment failed")
+            # Continue to show access info even if deployment failed partially
+        
+        # Get access information
+        get_access_info(os.path.join(project_dir, "kubeconfig"), f"bb-{manifest['name']}", tf_output)
     else:
-        print_info("Keeping local environment files as requested.")
+        print_info("Skipping Kubernetes deployment per --no-deploy-k8s flag")
+        get_access_info(os.path.join(project_dir, "kubeconfig"), f"bb-{manifest['name']}", tf_output)
     
-    print_success(f"Environment {env_id} destroyed successfully.")
+    print_success(f"🎉 Environment created successfully: {manifest['name']} ({env_id})")
+    print_info(f"Environment directory: {project_dir}")
+    
     return True
 
-def cmd_info(args):
-    """Get information about an environment."""
-    env_id = args.env_id
+def cmd_down(args):
+    """
+    Handle the 'down' command to destroy infrastructure for an environment.
     
-    # Get environment directory
-    env_dir = os.path.join(os.path.expanduser("~"), ".buildandburn", env_id)
+    This function handles the teardown process:
+    1. Finds the environment directory based on the given ID
+    2. Runs Terraform destroy to remove infrastructure
+    3. Removes environment information
+    
+    Args:
+        args (argparse.Namespace): Command-line arguments including:
+            - env_id (str): Environment ID to destroy
+            - auto_approve (bool): Skip confirmation prompts
+            
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    env_id = args.env_id
+    print_info("=" * 80)
+    print_info("BUILD AND BURN - ENVIRONMENT DESTRUCTION")
+    print_info("=" * 80)
+    
+    # Check if environment ID is provided
+    if not env_id:
+        print_error("Environment ID is required to destroy an environment")
+        print_info("Use 'buildandburn list' to see available environments")
+        return False
+    
+    # Find environment directory
+    home_dir = os.path.expanduser("~")
+    buildandburn_dir = os.path.join(home_dir, ".buildandburn")
+    env_dir = os.path.join(buildandburn_dir, env_id)
+    
     if not os.path.exists(env_dir):
-        print_error(f"Environment with ID {env_id} not found.")
+        print_error(f"Environment directory not found: {env_dir}")
+        print_info("Use 'buildandburn list' to see available environments")
         return False
     
     # Load environment info
     env_info_file = os.path.join(env_dir, "env_info.json")
     if not os.path.exists(env_info_file):
-        print_error(f"Environment info file not found for ID {env_id}.")
+        print_error(f"Environment info file not found: {env_info_file}")
+        if not args.force:
+            print_info("Use --force to remove the directory anyway")
+            return False
+        else:
+            print_warning(f"Forcibly removing directory: {env_dir}")
+            shutil.rmtree(env_dir, ignore_errors=True)
+            return True
+    
+    try:
+        with open(env_info_file, 'r') as f:
+            env_info = json.load(f)
+        
+        project_name = env_info.get('project_name', 'unknown')
+        created_at = env_info.get('created_at', 'unknown')
+        terraform_dir = env_info.get('terraform_dir')
+        
+        print_info(f"Environment: {project_name} ({env_id})")
+        print_info(f"Created: {created_at}")
+        
+        if not terraform_dir or not os.path.exists(terraform_dir):
+            print_error(f"Terraform directory not found: {terraform_dir}")
+            if not args.force:
+                print_info("Use --force to remove the directory anyway")
+                return False
+            else:
+                print_warning(f"Forcibly removing directory: {env_dir}")
+                shutil.rmtree(env_dir, ignore_errors=True)
+                return True
+        
+        # Confirm destruction unless auto-approve is set
+        if not args.auto_approve:
+            confirm = input(f"Are you sure you want to destroy environment {project_name} ({env_id})? [y/N]: ")
+            if confirm.lower() != 'y':
+                print_info("Destruction cancelled")
+                return False
+        
+        # Run Terraform destroy
+        print_info("=" * 80)
+        print_info("DESTROYING INFRASTRUCTURE")
+        print_info("=" * 80)
+        
+        destroy_cmd = ["terraform", "destroy"]
+        # Always add -auto-approve flag when running terraform destroy command
+        # to prevent terraform from asking for confirmation again
+        if args.auto_approve:
+            destroy_cmd.append("-auto-approve")
+        
+        print_info(f"Running Terraform destroy in {terraform_dir}")
+        try:
+            # Use input=b"yes\n" to auto-confirm the destroy operation if -auto-approve is not used
+            if "-auto-approve" in destroy_cmd:
+                run_command(destroy_cmd, cwd=terraform_dir)
+            else:
+                # Create a subprocess with input piping capability for non-auto-approve mode
+                print_info("You will need to confirm the destroy operation when prompted by Terraform.")
+                subprocess.run(destroy_cmd, cwd=terraform_dir, check=True)
+            
+            print_success("Infrastructure destroyed successfully")
+        except Exception as e:
+            print_error(f"Error during Terraform destroy: {str(e)}")
+            if not args.force:
+                print_info("Use --force to remove the directory anyway")
+                return False
+            else:
+                print_warning("Continuing with force removal despite Terraform error")
+        
+        # Remove environment directory
+        print_info(f"Removing environment directory: {env_dir}")
+        shutil.rmtree(env_dir, ignore_errors=True)
+        
+        print_success(f"Environment {project_name} ({env_id}) destroyed successfully")
+        return True
+    
+    except Exception as e:
+        print_error(f"Error destroying environment: {str(e)}")
+        if args.force:
+            print_warning(f"Forcibly removing directory: {env_dir}")
+            shutil.rmtree(env_dir, ignore_errors=True)
+            return True
+        return False
+
+def cmd_info(args):
+    """
+    Handle the 'info' command to display information about an environment.
+    
+    This function retrieves and displays detailed information about a specific
+    environment, including configuration, resources, and access URLs.
+    
+    Args:
+        args (argparse.Namespace): Command-line arguments including:
+            - env_id (str): Environment ID to get information for
+            - detailed (bool): Display more detailed information
+            
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    env_id = args.env_id
+    print_info("=" * 80)
+    print_info("BUILD AND BURN - ENVIRONMENT INFORMATION")
+    print_info("=" * 80)
+    
+    # Check if environment ID is provided
+    if not env_id:
+        print_error("Environment ID is required to get information")
+        print_info("Use 'buildandburn list' to see available environments")
+        return False
+    
+    # Find environment directory
+    home_dir = os.path.expanduser("~")
+    buildandburn_dir = os.path.join(home_dir, ".buildandburn")
+    env_dir = os.path.join(buildandburn_dir, env_id)
+    
+    if not os.path.exists(env_dir):
+        print_error(f"Environment directory not found: {env_dir}")
+        print_info("Use 'buildandburn list' to see available environments")
+        return False
+    
+    # Load environment info
+    env_info_file = os.path.join(env_dir, "env_info.json")
+    if not os.path.exists(env_info_file):
+        print_error(f"Environment info file not found: {env_info_file}")
         return False
     
     try:
         with open(env_info_file, 'r') as f:
             env_info = json.load(f)
         
-        # Display information
-        print_info("=" * 80)
-        print_info(f"ENVIRONMENT INFORMATION - {env_id}")
-        print_info("=" * 80)
+        project_name = env_info.get('project_name', 'unknown')
+        created_at = env_info.get('created_at', 'unknown')
+        terraform_dir = env_info.get('terraform_dir')
         
-        # Basic information
-        print_info(f"Project Name: {env_info.get('project_name', 'Unknown')}")
-        print_info(f"Created At:   {env_info.get('created_at', 'Unknown')}")
-        if 'destroyed_at' in env_info:
-            print_info(f"Destroyed At: {env_info.get('destroyed_at', 'Unknown')}")
-            print_warning("This environment has been destroyed.")
+        print_info(f"Environment: {project_name} ({env_id})")
+        print_info(f"Created: {created_at}")
+        print_info(f"Directory: {env_dir}")
         
-        # Access Information - Show this prominently
-        if 'access_info' in env_info:
-            access_info = env_info['access_info']
-            
-            # Show the primary URL most prominently if available
-            if 'primary_url' in access_info:
-                print_info("\n" + "=" * 80)
-                print_success(f"APPLICATION URL: {access_info['primary_url']}")
-                print_info("=" * 80)
-            
-            print_info("\nAccess Information:")
-            
-            # Show ingress information
-            if access_info.get('ingresses'):
-                print_info("\nIngress URLs:")
-                for name, url in access_info['ingresses'].items():
-                    print_info(f"- {name}: {url}")
-            
-            # Show service information
-            if access_info.get('services'):
-                print_info("\nService Endpoints:")
-                for name, endpoint in access_info['services'].items():
-                    print_info(f"- {name}: {endpoint}")
-            
-            # Show database information
-            if access_info.get('database'):
-                print_info("\nDatabase:")
-                print_info(f"- Endpoint: {access_info['database'].get('endpoint', 'Unknown')}")
-                print_info(f"- Username: {access_info['database'].get('username', 'Unknown')}")
-            
-            # Show message queue information
-            if access_info.get('message_queue'):
-                print_info("\nMessage Queue:")
-                print_info(f"- Endpoint: {access_info['message_queue'].get('endpoint', 'Unknown')}")
-                print_info(f"- Username: {access_info['message_queue'].get('username', 'Unknown')}")
-            
-            # Show Redis information
-            if access_info.get('redis'):
-                print_info("\nRedis:")
-                print_info(f"- Primary Endpoint: {access_info['redis'].get('primary_endpoint', 'Unknown')}")
-                if access_info['redis'].get('reader_endpoint'):
-                    print_info(f"- Reader Endpoint: {access_info['redis'].get('reader_endpoint', 'Unknown')}")
-                print_info(f"- Port: {access_info['redis'].get('port', '6379')}")
-        
-        # AWS information
-        print_info("\nAWS Details:")
-        print_info(f"Region:      {env_info.get('region', 'Unknown')}")
-        
-        # Resource information
-        if 'resources' in env_info:
-            total_cost = env_info.get('estimated_cost_per_hour', 0)
-            print_info("\nProvisioned Resources:")
-            for resource in env_info.get('resources', []):
-                print_info(f"- {resource.get('count', '?')} x {resource.get('type', 'Unknown')} ({resource.get('name', 'Unknown')})")
-            
-            print_info(f"\nEstimated Cost: ${total_cost}/hour (${total_cost * 24 * 30}/month)")
-        
-        # Terraform output
-        if 'terraform_output' in env_info and env_info['terraform_output']:
-            print_info("\nTerraform Outputs:")
-            for key, value in env_info['terraform_output'].items():
-                if 'value' in value and 'sensitive' in value and not value['sensitive']:
-                    print_info(f"- {key}: {value['value']}")
-        
-        # Working directories
-        print_info("\nEnvironment Directories:")
-        print_info(f"State File:        {env_info.get('state_file', 'Unknown')}")
-        print_info(f"Terraform Dir:     {env_info.get('terraform_dir', 'Unknown')}")
-        print_info(f"Working Dir:       {env_info.get('working_dir', 'Unknown')}")
-        
-        # Command for destruction
-        if 'destroyed_at' not in env_info:
-            print_info("\nTo destroy this environment, run:")
-            print_info(f"buildandburn down {env_id}")
-        
-        return True
-    except Exception as e:
-        print_error(f"Error reading environment information: {str(e)}")
-        return False
-
-def cmd_list(args):
-    """List all environments."""
-    print_info("=" * 80)
-    print_info("BUILD AND BURN - ENVIRONMENTS")
-    print_info("=" * 80)
-    
-    # Get buildandburn directory
-    bb_dir = os.path.join(os.path.expanduser("~"), ".buildandburn")
-    if not os.path.exists(bb_dir):
-        print_warning("No environments found.")
-        return True
-    
-    # Get all environment directories
-    env_dirs = [d for d in os.listdir(bb_dir) if os.path.isdir(os.path.join(bb_dir, d))]
-    if not env_dirs:
-        print_warning("No environments found.")
-        return True
-    
-    # Sort by creation time if available
-    env_info_list = []
-    for env_id in env_dirs:
-        env_dir = os.path.join(bb_dir, env_id)
-        env_info_file = os.path.join(env_dir, "env_info.json")
-        
-        if os.path.exists(env_info_file):
-            try:
-                with open(env_info_file, 'r') as f:
-                    env_info = json.load(f)
-                # Add environment info to list
-                env_info['env_id'] = env_id
-                env_info_list.append(env_info)
-            except Exception as e:
-                # If we can't read the info file, create a minimal entry
-                env_info_list.append({
-                    'env_id': env_id,
-                    'project_name': 'Unknown',
-                    'created_at': 'Unknown',
-                    'error': str(e)
-                })
-    
-    # Sort by creation time, most recent first
-    try:
-        env_info_list.sort(key=lambda x: x.get('created_at', ''), reverse=True)
-    except Exception:
-        # If sorting fails, don't bother
-        pass
-    
-    # Print table header
-    print(f"{'ID':<12} {'Project':<20} {'Created':<20} {'Status':<10} {'Region':<10}")
-    print("-" * 75)
-    
-    # Print environments
-    for env_info in env_info_list:
-        env_id = env_info.get('env_id', 'Unknown')
-        project_name = env_info.get('project_name', 'Unknown')
-        created_at = env_info.get('created_at', 'Unknown')
-        status = "DESTROYED" if 'destroyed_at' in env_info else "ACTIVE"
-        region = env_info.get('region', 'Unknown')
-        
-        print(f"{env_id:<12} {project_name:<20} {created_at:<20} {status:<10} {region:<10}")
-    
-    print("\nTo get information about a specific environment, run:")
-    print("buildandburn info ENV_ID")
-    
-    print("\nTo destroy a specific environment, run:")
-    print("buildandburn down ENV_ID")
-    
-    return True
-
-def ensure_valid_state_file(state_file_path, terraform_dir=None):
-    """
-    Check if a state file exists and is in valid format.
-    If not, create or update it with proper format.
-    """
-    try:
-        # Check if the file exists and read its content
-        if not os.path.exists(state_file_path):
-            create_valid_state_file(state_file_path, terraform_dir)
-            return True
-            
-        with open(state_file_path, 'r') as f:
-            content = f.read().strip()
-            
-        # Check if it's empty or just {}
-        if not content or content == "{}":
-            print_warning(f"State file at {state_file_path} has invalid format. Fixing...")
-            create_valid_state_file(state_file_path, terraform_dir)
-            return True
-            
-        # Check if it's valid JSON with version
-        try:
-            state_data = json.loads(content)
-            if "version" not in state_data:
-                print_warning(f"State file at {state_file_path} is missing version attribute. Fixing...")
-                create_valid_state_file(state_file_path, terraform_dir)
-                return True
-        except json.JSONDecodeError:
-            print_warning(f"State file at {state_file_path} is not valid JSON. Fixing...")
-            create_valid_state_file(state_file_path, terraform_dir)
-            return True
-            
-        # State file appears to be valid
-        return False
-        
-    except Exception as e:
-        print_error(f"Error checking state file: {str(e)}")
-        # Try to create a valid state file anyway
-        create_valid_state_file(state_file_path, terraform_dir)
-        return True
-        
-
-def create_valid_state_file(state_file_path, terraform_dir=None):
-    """Create a properly formatted Terraform state file."""
-    try:
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(state_file_path), exist_ok=True)
-        
-        # Try to get terraform version if terraform_dir is provided
-        terraform_version_str = "1.0.0"  # Default version
+        # Get Terraform output if available
+        tf_output = {}
         if terraform_dir and os.path.exists(terraform_dir):
             try:
-                terraform_version = subprocess.run(
-                    "terraform version -json",
-                    cwd=terraform_dir,
-                    shell=True,
-                    capture_output=True,
-                    text=True
-                ).stdout.strip()
-                
-                # Extract the version
-                terraform_version_obj = json.loads(terraform_version)
-                terraform_version_str = terraform_version_obj.get("terraform_version", "1.0.0")
-            except:
-                # If we can't get the version, use the default
-                pass
-        
-        # Create a properly formatted state file
-        state_content = {
-            "version": 4,
-            "terraform_version": terraform_version_str,
-            "serial": 0,
-            "lineage": str(uuid.uuid4()),
-            "outputs": {},
-            "resources": []
-        }
-        
-        with open(state_file_path, 'w') as f:
-            json.dump(state_content, f, indent=2)
-            
-        print_success(f"Created properly formatted state file at: {state_file_path}")
-        return True
-    except Exception as e:
-        print_error(f"Failed to create valid state file: {str(e)}")
-        return False
-
-def fix_terraform_issues(terraform_dir, error_analysis, tf_vars_file=None, region=None):
-    """Automatically fix common Terraform issues based on error analysis."""
-    if not error_analysis["auto_fix_possible"]:
-        print_warning("No automatic fixes available for the detected issues.")
-        return False
-    
-    fixes_applied = []
-    
-    for action in error_analysis["fix_actions"]:
-        if action == "add_provider_config":
-            if add_provider_config(terraform_dir, region):
-                fixes_applied.append("Added AWS provider configuration")
-        
-        elif action == "reinit_upgrade":
-            if reinit_terraform_with_upgrade(terraform_dir):
-                fixes_applied.append("Reinitialized Terraform with provider upgrades")
-        
-        elif action == "check_required_vars":
-            if check_and_fix_required_vars(terraform_dir, tf_vars_file, region):
-                fixes_applied.append("Added missing required variables")
-        
-        elif action == "fix_duplicate_providers":
-            if fix_duplicate_provider_blocks(terraform_dir):
-                fixes_applied.append("Fixed duplicate provider blocks")
-        
-        elif action == "clear_plugin_cache":
-            if clear_terraform_plugin_cache(terraform_dir):
-                fixes_applied.append("Cleared Terraform plugin cache")
-        
-        elif action == "auto_format":
-            if auto_format_terraform_files(terraform_dir):
-                fixes_applied.append("Auto-formatted Terraform files")
-    
-    if fixes_applied:
-        print_success(f"Applied fixes: {', '.join(fixes_applied)}")
-        return True
-    
-    return False
-
-def add_provider_config(terraform_dir, region=None):
-    """Add a proper AWS provider configuration to the Terraform files."""
-    try:
-        # Check for existing provider configurations in any Terraform file
-        provider_already_defined = False
-        tf_files = glob.glob(os.path.join(terraform_dir, "*.tf"))
-        
-        for tf_file in tf_files:
-            try:
-                with open(tf_file, 'r') as f:
-                    content = f.read()
-                    if 'provider "aws"' in content:
-                        file_name = os.path.basename(tf_file)
-                        print_info(f"AWS provider already defined in {file_name}")
-                        provider_already_defined = True
-                        break
+                tf_output_result = run_command(["terraform", "output", "-json"], 
+                                             cwd=terraform_dir, capture_output=True, allow_fail=True)
+                if tf_output_result.returncode == 0:
+                    tf_output = json.loads(tf_output_result.stdout)
             except Exception as e:
-                print_warning(f"Could not read {tf_file}: {str(e)}")
+                print_warning(f"Could not get Terraform output: {str(e)}")
         
-        # If provider is already defined, don't add another one
-        if provider_already_defined:
-            print_info("AWS provider already defined in an existing file. Skipping.")
-            return False
+        # Display access information
+        if tf_output:
+            print_info("=" * 80)
+            print_info("ACCESS INFORMATION")
+            print_info("=" * 80)
             
-        # Check if providers.tf already exists
-        providers_file = os.path.join(terraform_dir, "providers.tf")
-        
-        # If it doesn't exist, create it
-        if not os.path.exists(providers_file):
-            if not region:
-                region = "us-west-2"  # Default region
-            
-            with open(providers_file, 'w') as f:
-                f.write(f'''# AWS Provider Configuration
-provider "aws" {{
-  region = "{region}"
-}}
-''')
-            print_success(f"Created providers.tf with AWS provider configuration")
-            return True
-        
-        # If it exists, check if it has AWS provider configuration
-        with open(providers_file, 'r') as f:
-            content = f.read()
-        
-        if 'provider "aws"' not in content:
-            # Add AWS provider configuration
-            if not region:
-                region = "us-west-2"  # Default region
-            
-            with open(providers_file, 'a') as f:
-                f.write(f'''
-# AWS Provider Configuration
-provider "aws" {{
-  region = "{region}"
-}}
-''')
-            print_success(f"Added AWS provider configuration to existing providers.tf")
-            return True
-        
-        return False  # No changes needed
-    except Exception as e:
-        print_error(f"Failed to fix provider configuration: {str(e)}")
-        return False
-
-def reinit_terraform_with_upgrade(terraform_dir):
-    """Reinitialize Terraform with upgrade flag to refresh providers."""
-    try:
-        print_info("Reinitializing Terraform with provider upgrades...")
-        result = run_command(["terraform", "init", "-upgrade"], cwd=terraform_dir, capture_output=True)
-        print_success("Successfully reinitialized Terraform with provider upgrades")
-        return True
-    except Exception as e:
-        print_error(f"Failed to reinitialize Terraform: {str(e)}")
-        return False
-
-def check_and_fix_required_vars(terraform_dir, tf_vars_file, region=None):
-    """Check for required variables and add defaults to tfvars file."""
-    if not tf_vars_file:
-        print_warning("No tfvars file provided, cannot fix missing variables")
-        return False
-    
-    try:
-        # Use terraform-config-inspect to find required variables
-        vars_check_cmd = ["terraform-config-inspect", "--json", "."]
-        try:
-            vars_process = run_command(vars_check_cmd, cwd=terraform_dir, capture_output=True, allow_fail=True)
-            vars_data = json.loads(vars_process.stdout)
-            required_vars = []
-            
-            # Find required variables
-            for var in vars_data.get("variables", []):
-                if not var.get("default") and not var.get("required", False):
-                    required_vars.append(var.get("name"))
-            
-            # Check if all required variables are in our tfvars file
-            with open(tf_vars_file, 'r') as f:
-                tfvars_data = json.load(f)
-            
-            missing_vars = []
-            for var in required_vars:
-                if var not in tfvars_data:
-                    missing_vars.append(var)
-            
-            if missing_vars:
-                print_warning(f"Missing required variables: {', '.join(missing_vars)}")
-                print_info("Updating tfvars file with defaults for missing variables...")
+            # Try to get kubeconfig if available
+            kubeconfig_path = os.path.join(env_dir, "kubeconfig")
+            if os.path.exists(kubeconfig_path):
+                get_access_info(kubeconfig_path, f"bb-{project_name}", tf_output)
+            else:
+                print_info("Kubeconfig not found. Infrastructure might not include Kubernetes.")
                 
-                # Add default values for missing variables
-                for var in missing_vars:
-                    # Set some sensible defaults based on variable name patterns
-                    if "region" in var and region:
-                        tfvars_data[var] = region
-                    elif var == "project_name":
-                        tfvars_data[var] = "buildandburn-project"
-                    elif var == "env_id":
-                        tfvars_data[var] = "dev"
-                    else:
-                        # Generic default based on type
-                        tfvars_data[var] = ""  # Empty string as default
-                
-                # Save updated tfvars
-                with open(tf_vars_file, 'w') as f:
-                    json.dump(tfvars_data, f, indent=2)
-                return True
-            
-            return False  # No missing variables
-        except:
-            print_warning("terraform-config-inspect not available, skipping variable checking")
-            return False
-    except Exception as e:
-        print_error(f"Failed to check and fix variables: {str(e)}")
-        return False
-
-def fix_duplicate_provider_blocks(terraform_dir):
-    """Fix duplicate provider blocks in Terraform files."""
-    try:
-        # Find all provider blocks in all Terraform files
-        provider_files = []
-        tf_files = glob.glob(os.path.join(terraform_dir, "*.tf"))
-        
-        # First, check if provider-aws.tf exists
-        provider_aws_path = os.path.join(terraform_dir, "provider-aws.tf")
-        provider_aws_exists = os.path.exists(provider_aws_path)
-        
-        # If provider-aws.tf exists, we'll keep that one and remove others
-        primary_provider_file = "provider-aws.tf" if provider_aws_exists else None
-        
-        # Find all files with AWS provider blocks
-        for tf_file in tf_files:
-            file_name = os.path.basename(tf_file)
-            with open(tf_file, 'r') as f:
-                content = f.read()
-            
-            # Check for provider blocks
-            if 'provider "aws"' in content:
-                provider_files.append(file_name)
-        
-        # If we have duplicate provider blocks, fix them
-        if len(provider_files) > 1:
-            print_warning(f"Found duplicate AWS provider blocks in: {', '.join(provider_files)}")
-            
-            # If we don't have a primary provider file yet, use the first one that's not providers.tf
-            if primary_provider_file is None:
-                for file_name in provider_files:
-                    if file_name != "providers.tf":
-                        primary_provider_file = file_name
-                        break
-                
-                # If we still don't have a primary file, use providers.tf if it exists
-                if primary_provider_file is None and "providers.tf" in provider_files:
-                    primary_provider_file = "providers.tf"
-                # Otherwise, just use the first file
-                elif primary_provider_file is None and provider_files:
-                    primary_provider_file = provider_files[0]
-            
-            print_info(f"Keeping AWS provider in {primary_provider_file} and removing from others")
-            
-            # Remove provider blocks from all other files
-            for file_name in provider_files:
-                if file_name != primary_provider_file:
-                    file_path = os.path.join(terraform_dir, file_name)
-                    with open(file_path, 'r') as f:
-                        content = f.read()
+                # Show raw Terraform outputs if detailed info requested
+                if args.detailed:
+                    print_info("=" * 80)
+                    print_info("TERRAFORM OUTPUTS")
+                    print_info("=" * 80)
                     
-                    # Extract the provider block and remove it
-                    provider_pattern = r'provider\s+"aws"\s+\{[^}]*\}'
-                    new_content = re.sub(provider_pattern, '', content)
-                    
-                    # Clean up extra empty lines
-                    new_content = re.sub(r'\n\s*\n\s*\n', '\n\n', new_content)
-                    
-                    with open(file_path, 'w') as f:
-                        f.write(new_content)
-            
-            print_success(f"Removed duplicate AWS provider blocks, keeping the one in {primary_provider_file}")
-            return True
-        
-        # Also check for duplicate required_providers blocks
-        required_providers_files = []
-        for tf_file in tf_files:
-            file_name = os.path.basename(tf_file)
-            with open(tf_file, 'r') as f:
-                content = f.read()
-            
-            # Check for required_providers blocks
-            if 'required_providers' in content:
-                required_providers_files.append(file_name)
-        
-        # If we have duplicate required_providers blocks, fix them
-        if len(required_providers_files) > 1:
-            print_warning(f"Found duplicate required_providers blocks in: {', '.join(required_providers_files)}")
-            
-            # Prefer to keep the one in main.tf if it exists
-            primary_required_file = "main.tf" if "main.tf" in required_providers_files else required_providers_files[0]
-            print_info(f"Keeping required_providers in {primary_required_file} and removing from others")
-            
-            # Remove required_providers blocks from all other files
-            for file_name in required_providers_files:
-                if file_name != primary_required_file:
-                    file_path = os.path.join(terraform_dir, file_name)
-                    with open(file_path, 'r') as f:
-                        content = f.read()
-                    
-                    # This pattern matches the required_providers block within a terraform block
-                    req_pattern = r'required_providers\s+\{[^}]*\}'
-                    
-                    # First try to remove just the required_providers block within terraform
-                    content_modified = False
-                    terraform_blocks = re.findall(r'terraform\s+\{[^}]*\}', content, re.DOTALL)
-                    for terraform_block in terraform_blocks:
-                        if 'required_providers' in terraform_block:
-                            new_terraform_block = re.sub(req_pattern, '', terraform_block)
-                            # If the terraform block is now empty, remove it entirely
-                            if re.match(r'terraform\s+\{\s*\}', new_terraform_block):
-                                content = content.replace(terraform_block, '')
+                    for output_name, output_value in tf_output.items():
+                        if isinstance(output_value, dict) and 'value' in output_value:
+                            # Handle complex output with sensitive values
+                            if 'sensitive' in output_value and output_value['sensitive']:
+                                print_info(f"{output_name}: [sensitive]")
+                            elif isinstance(output_value['value'], (dict, list)):
+                                print_info(f"{output_name}:")
+                                print(json.dumps(output_value['value'], indent=2))
                             else:
-                                content = content.replace(terraform_block, new_terraform_block)
-                            content_modified = True
-                    
-                    # If we couldn't modify with the above approach, try a more aggressive approach
-                    if not content_modified:
-                        # Try to remove the entire terraform block if it contains required_providers
-                        terraform_pattern = r'terraform\s+\{[^}]*required_providers[^}]*\}'
-                        content = re.sub(terraform_pattern, '', content, flags=re.DOTALL)
-                    
-                    # Clean up extra empty lines
-                    content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
-                    
-                    with open(file_path, 'w') as f:
-                        f.write(content)
-            
-            print_success(f"Removed duplicate required_providers blocks, keeping the one in {primary_required_file}")
-            return True
+                                print_info(f"{output_name}: {output_value['value']}")
         
-        return False  # No duplicate provider or required_providers blocks
-    except Exception as e:
-        print_error(f"Failed to fix duplicate provider blocks: {str(e)}")
-        return False
-
-def clear_terraform_plugin_cache(terraform_dir):
-    """Clear Terraform plugin cache to fix provider issues."""
-    try:
-        # Remove .terraform directory
-        terraform_plugins_dir = os.path.join(terraform_dir, ".terraform")
-        if os.path.exists(terraform_plugins_dir):
-            print_info(f"Removing Terraform plugin cache directory: {terraform_plugins_dir}")
-            shutil.rmtree(terraform_plugins_dir, ignore_errors=True)
-        
-        # Remove .terraform.lock.hcl file
-        lock_file = os.path.join(terraform_dir, ".terraform.lock.hcl")
-        if os.path.exists(lock_file):
-            print_info(f"Removing Terraform lock file: {lock_file}")
-            os.remove(lock_file)
-        
-        print_success("Cleared Terraform plugin cache")
-        
-        # Try reinitialization
-        print_info("Reinitializing Terraform...")
-        init_cmd = ["terraform", "init"]
-        run_command(init_cmd, cwd=terraform_dir, capture_output=True)
+        # Show manifest information if available
+        manifest_file = os.path.join(env_dir, "manifest.yaml")
+        if os.path.exists(manifest_file) and args.detailed:
+            try:
+                with open(manifest_file, 'r') as f:
+                    manifest = yaml.safe_load(f)
+                
+                print_info("=" * 80)
+                print_info("MANIFEST")
+                print_info("=" * 80)
+                print(yaml.dump(manifest, default_flow_style=False, sort_keys=False))
+            except Exception as e:
+                print_warning(f"Could not load manifest: {str(e)}")
         
         return True
+    
     except Exception as e:
-        print_error(f"Failed to clear Terraform plugin cache: {str(e)}")
+        print_error(f"Error getting environment information: {str(e)}")
         return False
-
-def auto_format_terraform_files(terraform_dir):
-    """Auto-format Terraform files to fix syntax issues."""
-    try:
-        print_info("Auto-formatting Terraform files...")
-        fmt_cmd = ["terraform", "fmt", "-recursive"]
-        result = run_command(fmt_cmd, cwd=terraform_dir, capture_output=True, allow_fail=True)
-        
-        if result.returncode == 0:
-            print_success("Successfully formatted Terraform files")
-            return True
-        else:
-            print_warning("Terraform fmt failed. Some files may have syntax errors that cannot be automatically fixed.")
-            return False
-    except Exception as e:
-        print_error(f"Failed to format Terraform files: {str(e)}")
-        return False
-
-def ensure_k8s_resources(manifest, k8s_dir, project_dir, auto_generate=True):
-    """Ensure Kubernetes resource files exist, generate them if not and if auto_generate is enabled.
-    
-    Args:
-        manifest: The manifest dict
-        k8s_dir: The default k8s directory
-        project_dir: The project directory
-        auto_generate: Whether to auto-generate resources if none exist (default: True)
-        
-    Returns:
-        The path to the k8s resources to use
-    """
-    print_info("Checking for Kubernetes resources...")
-    
-    # Define paths to check
-    helm_chart_path = os.path.join(k8s_dir, "chart")
-    manifests_path = os.path.join(k8s_dir, "manifests")
-    
-    # Check if any are custom-defined in the manifest
-    custom_k8s_path = None
-    if 'k8s_path' in manifest:
-        custom_k8s_path = os.path.abspath(manifest['k8s_path'])
-        print_info(f"Custom k8s path specified in manifest: {custom_k8s_path}")
-        
-        if os.path.exists(custom_k8s_path):
-            print_info(f"Using user-provided Kubernetes resources from: {custom_k8s_path}")
-            return custom_k8s_path
-        else:
-            print_warning(f"Specified k8s_path '{custom_k8s_path}' does not exist.")
-    
-    # Check for helm chart or manifests in standard locations
-    has_helm_chart = os.path.exists(os.path.join(helm_chart_path, "Chart.yaml"))
-    has_manifests = os.path.exists(manifests_path) and any(f.endswith(('.yaml', '.yml')) for f in os.listdir(manifests_path)) if os.path.exists(manifests_path) else False
-    
-    # If standard resources exist, use them
-    if has_helm_chart:
-        print_info(f"Using existing Helm chart from: {helm_chart_path}")
-        return k8s_dir
-    elif has_manifests:
-        print_info(f"Using existing Kubernetes manifests from: {manifests_path}")
-        return k8s_dir
-    
-    # If nothing exists and auto_generate is disabled, return the default k8s_dir
-    if not auto_generate:
-        print_info("No Kubernetes resources found and auto-generation is disabled. Using default paths.")
-        return k8s_dir
-    
-    # Check if the k8s_generator module is available
-    if not k8s_generator_available:
-        print_warning("K8s generator module not available, skipping resource generation.")
-        return k8s_dir
-    
-    # If no resources exist and auto_generate is enabled, generate resources
-    print_info("No Kubernetes resources found. Generating from manifest...")
-    generated_dir = os.path.join(project_dir, "generated_k8s")
-    
-    # Generate both Helm chart and raw manifests
-    try:
-        k8s_generator.generate_manifests(manifest, os.path.join(generated_dir, "manifests"))
-        k8s_generator.create_helm_chart(manifest, generated_dir)
-        
-        print_success("Generated Kubernetes resources successfully.")
-        print_info(f"Helm chart: {os.path.join(generated_dir, 'chart')}")
-        print_info(f"Manifests: {os.path.join(generated_dir, 'manifests')}")
-        
-        # Set the k8s_dir to the generated directory
-        return generated_dir
-    except Exception as e:
-        print_warning(f"Failed to generate Kubernetes resources: {str(e)}")
-        traceback.print_exc()
-        return k8s_dir
 
 def validate_terraform_modules_against_manifest(manifest, terraform_project_dir):
     """
@@ -4479,6 +3758,77 @@ def handle_terraform_timeout(process, resources, current_time, start_time, last_
     
     log_file.write(f"\nProcess timed out after {timeout} seconds\n")
     return True, last_activity_time  # Do terminate
+
+def cmd_list(args):
+    """
+    Handle the 'list' command to list all available environments.
+    
+    This function displays a table of all environments created with buildandburn,
+    showing their project names, IDs, creation times, and regions.
+    
+    Args:
+        args (argparse.Namespace): Command-line arguments
+            
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    print_info("=" * 80)
+    print_info("BUILD AND BURN - ENVIRONMENTS")
+    print_info("=" * 80)
+    
+    # Find environment directories
+    home_dir = os.path.expanduser("~")
+    buildandburn_dir = os.path.join(home_dir, ".buildandburn")
+    
+    if not os.path.exists(buildandburn_dir):
+        print_info("No environments found")
+        return True
+    
+    # Get all environment directories
+    env_dirs = [d for d in os.listdir(buildandburn_dir) 
+              if os.path.isdir(os.path.join(buildandburn_dir, d))]
+    
+    if not env_dirs:
+        print_info("No environments found")
+        return True
+    
+    # Collect environment information
+    environments = []
+    for env_id in env_dirs:
+        env_dir = os.path.join(buildandburn_dir, env_id)
+        env_info_file = os.path.join(env_dir, "env_info.json")
+        
+        if os.path.exists(env_info_file):
+            try:
+                with open(env_info_file, 'r') as f:
+                    env_info = json.load(f)
+                
+                environments.append({
+                    "project_name": env_info.get('project_name', 'unknown'),
+                    "env_id": env_id,
+                    "created_at": env_info.get('created_at', 'unknown'),
+                    "region": env_info.get('region', 'unknown')
+                })
+            except Exception as e:
+                print_warning(f"Could not load environment info for {env_id}: {str(e)}")
+    
+    if not environments:
+        print_info("No environments found with valid info files")
+        return True
+    
+    # Sort environments by creation time (newest first)
+    environments.sort(key=lambda e: e["created_at"], reverse=True)
+    
+    # Display environments as a table
+    print_info(f"{'Project':<30} {'ID':<10} {'Created':<25} {'Region':<15}")
+    print_info("-" * 80)
+    
+    for env in environments:
+        print_info(
+            f"{env['project_name']:<30} {env['env_id']:<10} {env['created_at']:<25} {env['region']:<15}"
+        )
+    
+    return True
 
 def main():
     parser = argparse.ArgumentParser(description='Build and Burn - Create disposable development environments')

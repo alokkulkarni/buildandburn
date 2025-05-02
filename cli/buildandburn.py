@@ -2552,6 +2552,46 @@ def cmd_up(args):
     # Enable debug logging
     os.environ['BUILDANDBURN_DEBUG'] = '1'
     
+    # Check if this is a dry run
+    if hasattr(args, 'dry_run') and args.dry_run:
+        print_info("=" * 80)
+        print_info("DRY RUN MODE - Validating configuration only")
+        print_info("=" * 80)
+        
+        # Validate terraform configuration
+        terraform_project_dir = os.path.join(terraform_dir)
+        if not os.path.exists(terraform_project_dir):
+            print_error(f"Terraform project directory not found: {terraform_project_dir}")
+            return False
+        
+        # Run preflight checks
+        preflight_success = run_preflight_checks(manifest, env_id, terraform_project_dir)
+        if not preflight_success:
+            print_error("Preflight checks failed.")
+            return False
+            
+        # Check Kubernetes resources
+        try:
+            # Determine whether to auto-generate Kubernetes resources
+            auto_generate = not args.no_generate_k8s if hasattr(args, 'no_generate_k8s') else True
+            
+            # Check if Kubernetes resources are available
+            k8s_resources_path = ensure_k8s_resources(manifest, k8s_dir, os.getcwd(), auto_generate=False)
+            if k8s_resources_path:
+                print_success(f"Kubernetes resources found at: {k8s_resources_path}")
+            elif auto_generate:
+                print_info("Kubernetes resources will be generated during deployment")
+            else:
+                print_warning("No Kubernetes resources found and auto-generation is disabled")
+                
+            print_info("=" * 80)
+            print_success("DRY RUN VALIDATION SUCCESSFUL - Configuration looks good")
+            print_info("=" * 80)
+            return True
+        except Exception as e:
+            print_error(f"Kubernetes resources validation failed: {str(e)}")
+            return False
+    
     # Provision infrastructure
     project_dir, tf_output = provision_infrastructure(manifest, env_id, terraform_dir, args=args)
     
@@ -4023,6 +4063,7 @@ def main():
     parser_up.add_argument('-i', '--env-id', help='Environment ID (generated if not provided)')
     parser_up.add_argument('-a', '--auto-approve', action='store_true', help='Auto-approve Terraform operations')
     parser_up.add_argument('--no-generate-k8s', action='store_true', help='Disable automatic generation of Kubernetes resources')
+    parser_up.add_argument('--dry-run', action='store_true', help='Validate configuration without creating resources')
     parser_up.set_defaults(func=cmd_up)
     
     # Down command

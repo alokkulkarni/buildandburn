@@ -68,7 +68,7 @@ dependencies:
   
   - type: queue
     provider: rabbitmq
-    version: "3.9.16"
+    version: "3.13"
     instance_class: mq.t3.micro
 ```
 

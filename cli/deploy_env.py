@@ -378,7 +378,7 @@ def main():
             mq_config = next((dep for dep in manifest.get('dependencies', []) if dep['type'] == 'queue'), {})
             tfvars.update({
                 "mq_engine_type": mq_config.get('provider', 'RabbitMQ'),
-                "mq_engine_version": mq_config.get('version', '3.9.16'),
+                "mq_engine_version": mq_config.get('version', '3.13'),
                 "mq_instance_type": mq_config.get('instance_class', 'mq.t3.micro'),
             })
         

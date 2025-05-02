@@ -169,7 +169,7 @@ dependencies:
     version: "13"
   - type: queue
     provider: rabbitmq
-    version: "3.9.16"
+    version: "3.13"
 ```
 
 ### Custom Configuration

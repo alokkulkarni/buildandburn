@@ -10,7 +10,7 @@ dependencies:
     storage: 20
   - type: queue
     provider: RabbitMQ
-    version: "3.9.16"
+    version: "3.13"
     instance_class: mq.t3.micro
   - type: redis
     version: "6.2"

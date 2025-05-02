@@ -27,8 +27,8 @@ except ImportError:
 
 # Global configuration
 CONFIG = {
-    "TERRAFORM_APPLY_TIMEOUT": 3600,  # 1 hour timeout for terraform apply
-    "TERRAFORM_DESTROY_TIMEOUT": 1800,  # 30 minutes timeout for terraform destroy
+    "TERRAFORM_APPLY_TIMEOUT": 7200,  # 2 hour timeout for terraform apply
+    "TERRAFORM_DESTROY_TIMEOUT": 3600,  # 1 hour timeout for terraform destroy
     "TERRAFORM_INIT_TIMEOUT": 300,    # 5 minutes timeout for terraform init
     "PROGRESS_UPDATE_INTERVAL": 30,   # Update progress every 30 seconds
     "DEBUG": False
@@ -437,14 +437,14 @@ def prepare_terraform_vars(manifest, env_id, project_dir):
         if mq_config:
             tf_vars.update({
                 "mq_engine_type": mq_config.get('provider', 'RabbitMQ'),
-                "mq_engine_version": mq_config.get('version', '3.9.16'),
+                "mq_engine_version": mq_config.get('version', '3.13'),
                 "mq_instance_type": mq_config.get('instance_class', 'mq.t3.micro'),
             })
         else:
             print_warning("Queue dependency specified but no configuration found. Using defaults.")
             tf_vars.update({
                 "mq_engine_type": "RabbitMQ",
-                "mq_engine_version": "3.9.16",
+                "mq_engine_version": "3.13",
                 "mq_instance_type": "mq.t3.micro",
             })
     
@@ -1428,16 +1428,21 @@ terraform {{
                 
                 # Check for timeout, but only if there's been no activity for a while
                 if elapsed_time > timeout:
-                    print_error(f"Terraform apply timed out after {timeout} seconds")
-                    process.terminate()
-                    # Wait a bit for process to terminate
-                    try:
-                        process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
+                    should_terminate, last_activity_time = handle_terraform_timeout(
+                        process, 
+                        creating_resources, 
+                        current_time, 
+                        start_time, 
+                        last_activity_time, 
+                        timeout, 
+                        log_file, 
+                        "apply"
+                    )
                     
-                    log_file.write(f"\nProcess timed out after {timeout} seconds\n")
-                    return project_dir, {}
+                    if should_terminate:
+                        return project_dir, {}
+                    else:
+                        continue
                 
                 # Check if output is available (non-blocking)
                 line = ""
@@ -2920,12 +2925,31 @@ terraform {{
                     
                     # Check for timeout
                     if elapsed_time > timeout:
+                        # Try to intelligently handle the timeout
+                        time_since_last_activity = current_time - last_activity_time
+                        if time_since_last_activity > 300:  # No activity for 5 minutes
+                            # Check for specific resources that might be stuck
+                            stuck_resources = list(destroying_resources)
+                            
+                            if stuck_resources:
+                                print_warning(f"The following resources appear to be stuck: {', '.join(stuck_resources)}")
+                                
+                                # For some resources, we know retrying can help
+                                retry_resources = [r for r in stuck_resources if any(x in r.lower() for x in ["eks", "kafka", "mq", "rds", "iam"])]
+                                
+                                if retry_resources and elapsed_time < (timeout * 0.8):
+                                    print_info(f"Attempting to continue with {', '.join(retry_resources)}...")
+                                    # Reset activity timer to give more time
+                                    last_activity_time = current_time
+                                    continue
+                        
+                        # If we reach here, we need to terminate
                         print_error(f"Terraform destroy timed out after {timeout} seconds")
-                        destroy_process.terminate()
+                        apply_process.terminate()
                         try:
-                            destroy_process.wait(timeout=10)
+                            apply_process.wait(timeout=10)
                         except subprocess.TimeoutExpired:
-                            destroy_process.kill()
+                            apply_process.kill()
                         
                         log_file.write(f"\nProcess timed out after {timeout} seconds\n")
                         print_warning("Some resources may still exist in your AWS account.")
@@ -3039,6 +3063,25 @@ terraform {{
                     
                     # Check for timeout
                     if elapsed_time > timeout:
+                        # Try to intelligently handle the timeout
+                        time_since_last_activity = current_time - last_activity_time
+                        if time_since_last_activity > 300:  # No activity for 5 minutes
+                            # Check for specific resources that might be stuck
+                            stuck_resources = list(destroying_resources)
+                            
+                            if stuck_resources:
+                                print_warning(f"The following resources appear to be stuck: {', '.join(stuck_resources)}")
+                                
+                                # For some resources, we know retrying can help
+                                retry_resources = [r for r in stuck_resources if any(x in r.lower() for x in ["eks", "kafka", "mq", "rds", "iam"])]
+                                
+                                if retry_resources and elapsed_time < (timeout * 0.8):
+                                    print_info(f"Attempting to continue with {', '.join(retry_resources)}...")
+                                    # Reset activity timer to give more time
+                                    last_activity_time = current_time
+                                    continue
+                        
+                        # If we reach here, we need to terminate
                         print_error(f"Terraform destroy timed out after {timeout} seconds")
                         apply_process.terminate()
                         try:
@@ -4128,6 +4171,58 @@ module "{module_var_name}" {{
             pass
     
     return fixed
+
+def handle_terraform_timeout(process, resources, current_time, start_time, last_activity_time, timeout, log_file, operation="apply"):
+    """Handle Terraform operation timeout with intelligent retry logic.
+    
+    Args:
+        process: The subprocess.Popen object
+        resources: Set of resources being operated on
+        current_time: Current timestamp
+        start_time: Timestamp when the operation started
+        last_activity_time: Timestamp of last activity
+        timeout: Timeout limit in seconds
+        log_file: File handle for logging
+        operation: Type of operation, 'apply' or 'destroy'
+        
+    Returns:
+        Tuple of (should_terminate, last_activity_time)
+        - should_terminate: True if process should be terminated, False to continue
+        - last_activity_time: Updated last activity timestamp if continuing
+    """
+    elapsed_time = current_time - start_time
+    print_error(f"Terraform {operation} timed out after {timeout} seconds")
+    
+    # Check for specific timeout cases where retrying might help
+    time_since_last_activity = current_time - last_activity_time
+    if time_since_last_activity > 300:  # No activity for 5 minutes
+        print_warning("No activity detected for 5 minutes. This might be a stuck operation.")
+        
+        # Try to identify stuck resources
+        stuck_resources = list(resources)
+        
+        if stuck_resources:
+            print_warning(f"The following resources appear to be stuck: {', '.join(stuck_resources)}")
+            
+            # For some resources, we know retrying can help
+            resource_types = ["eks", "kafka", "mq", "rds", "iam"]
+            retry_resources = [r for r in stuck_resources if any(x in r.lower() for x in resource_types)]
+            
+            if retry_resources and elapsed_time < (timeout * 0.8):  # Only retry if we haven't used most of the timeout
+                print_info(f"Attempting to continue with {', '.join(retry_resources)}...")
+                # Continue execution and give more time for these specific resources
+                return False, current_time  # Don't terminate, update last activity time
+    
+    # If we reach here, terminate the process
+    process.terminate()
+    # Wait a bit for process to terminate
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+    
+    log_file.write(f"\nProcess timed out after {timeout} seconds\n")
+    return True, last_activity_time  # Do terminate
 
 def main():
     parser = argparse.ArgumentParser(description='Build and Burn - Create disposable development environments')

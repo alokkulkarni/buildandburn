@@ -2,6 +2,12 @@ name: hello-world
 region: eu-west-2
 k8s_path: "./helm-charts"
 
+# Provider configuration
+provider_config:
+  aws:
+    max_retries: 10
+    retry_mode: "standard"
+
 # Services to deploy
 services:
   - name: springboot-backend
@@ -9,12 +15,16 @@ services:
     port: 8080
     replicas: 1
     expose: true
+    service:
+      type: ClusterIP
   
   - name: nginx-frontend
     image: nginx:alpine
     port: 80
     replicas: 1
     expose: true
+    service:
+      type: LoadBalancer
     configMapData:
       nginx.conf: |
         server {
@@ -22,7 +32,7 @@ services:
             server_name localhost;
             
             location / {
-                proxy_pass http://springboot-backend:8080;
+                proxy_pass http://springboot-backend.bb-hello-world.svc.cluster.local:8080;
                 proxy_set_header Host $host;
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

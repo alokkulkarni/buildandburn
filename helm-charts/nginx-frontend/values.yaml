@@ -9,7 +9,7 @@ nameOverride: ""
 fullnameOverride: ""
 
 service:
-  type: ClusterIP
+  type: LoadBalancer
   port: 80
 
 resources:
@@ -21,7 +21,7 @@ resources:
     memory: 128Mi
 
 ingress:
-  enabled: true
+  enabled: false
   className: "nginx"
   annotations:
     nginx.ingress.kubernetes.io/rewrite-target: /
@@ -33,16 +33,45 @@ ingress:
 
 configMapData:
   nginx.conf: |
-    server {
-        listen 80;
-        server_name localhost;
+    user  nginx;
+    worker_processes  auto;
+    
+    error_log  /var/log/nginx/error.log notice;
+    pid        /var/run/nginx.pid;
+    
+    events {
+        worker_connections  1024;
+    }
+    
+    http {
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
         
-        location / {
-            proxy_pass http://springboot-backend:8080;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
+        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                         '$status $body_bytes_sent "$http_referer" '
+                         '"$http_user_agent" "$http_x_forwarded_for"';
+        
+        access_log  /var/log/nginx/access.log  main;
+        
+        sendfile        on;
+        keepalive_timeout  65;
+        
+        server {
+            listen       80;
+            server_name  localhost;
+            
+            location / {
+                proxy_pass http://springboot-backend.bb-hello-world.svc.cluster.local:8080;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+            
+            error_page   500 502 503 504  /50x.html;
+            location = /50x.html {
+                root   /usr/share/nginx/html;
+            }
         }
     }
 

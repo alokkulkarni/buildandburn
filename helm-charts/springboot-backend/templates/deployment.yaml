@@ -20,7 +20,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
-              containerPort: {{ .Values.service.port }}
+              containerPort: 8080
               protocol: TCP
           env:
             {{- toYaml .Values.env | nindent 12 }}
@@ -59,4 +59,4 @@ spec:
           readinessProbe:
             {{- toYaml .Values.readinessProbe | nindent 12 }}
           resources:
-            {{- toYaml .Values.resources | nindent 12 }} 
+            {{- toYaml .Values.resources | nindent 12 }}

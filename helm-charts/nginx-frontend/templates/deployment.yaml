@@ -20,10 +20,12 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
-              containerPort: {{ .Values.service.port }}
+              containerPort: 80
               protocol: TCP
           volumeMounts:
-            {{- toYaml .Values.volumeMounts | nindent 12 }}
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
@@ -31,4 +33,9 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
-        {{- toYaml .Values.volumes | nindent 8 }} 
+        - name: nginx-config
+          configMap:
+            name: {{ include "nginx-frontend.fullname" . }}-config
+            items:
+              - key: nginx.conf
+                path: nginx.conf

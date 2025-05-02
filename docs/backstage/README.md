@@ -2,16 +2,36 @@
 
 This plugin integrates the Build and Burn environment management system with Backstage, allowing developers to create, manage, and destroy their build-and-burn environments directly from the Backstage developer portal.
 
+## Features
+
+- Create environments directly from manifest YAML
+- Trigger GitHub Actions workflows to manage environments
+- Monitor GitHub Actions workflow runs in real-time
+- View environment details and access information
+- Destroy environments when no longer needed
+- Real-time log viewing for workflow runs
+
 ## Installation
 
-### 1. Install the plugin in your Backstage app
+### Prerequisites
+
+Before installing the plugin, ensure you have:
+
+1. A running Backstage instance
+2. Node.js 14+ (16+ recommended)
+3. Yarn
+4. GitHub integration configured in your Backstage instance
+
+### Frontend Plugin Installation
+
+1. Install the plugin in your Backstage app:
 
 ```bash
 # From your Backstage app directory
 yarn add --cwd packages/app @internal/plugin-buildandburn
 ```
 
-### 2. Add the plugin to your Backstage app
+2. Add the plugin to your Backstage app:
 
 Edit your `packages/app/src/App.tsx` file to import and use the plugin:
 
@@ -22,7 +42,7 @@ import { BuildAndBurnPage } from '@internal/plugin-buildandburn';
 <Route path="/build-and-burn" element={<BuildAndBurnPage />} />
 ```
 
-### 3. Add the plugin to your sidebar
+3. Add the plugin to your sidebar:
 
 Edit your `packages/app/src/components/Root/Root.tsx` file:
 
@@ -33,20 +53,11 @@ import BuildIcon from '@material-ui/icons/Build';
 <SidebarItem icon={BuildIcon} to="build-and-burn" text="Build & Burn" />
 ```
 
-### 4. Configure the API backend
-
-Create a file `app-config.local.yaml` in your Backstage root:
-
-```yaml
-buildandburn:
-  baseUrl: http://localhost:8080/api/buildandburn
-```
-
-### 5. Register the API client
+4. Register the API client:
 
 Edit your `packages/app/src/apis.ts` file:
 
-```ts
+```tsx
 import { BuildAndBurnClient, buildAndBurnApiRef } from '@internal/plugin-buildandburn';
 
 // Add to the ApiFactories
@@ -54,65 +65,105 @@ createApiFactory({
   api: buildAndBurnApiRef,
   deps: { configApi: configApiRef },
   factory: ({ configApi }) => new BuildAndBurnClient({
-    baseUrl: configApi.getString('buildandburn.baseUrl'),
+    baseUrl: configApi.getString('backend.baseUrl') + '/api/buildandburn',
   }),
 }),
 ```
+
+### Backend Plugin Installation
+
+1. Create a backend plugin in your Backstage backend:
+
+```bash
+# From your Backstage root directory
+yarn new --select backend-plugin --option id=buildandburn
+```
+
+2. Add the Build and Burn API routes to your backend:
+
+```typescript
+// In packages/backend/src/plugins/buildandburn.ts
+import { createRouter } from '@internal/plugin-buildandburn/src/backend';
+import { PluginEnvironment } from '../types';
+
+export default async function createPlugin(
+  env: PluginEnvironment,
+): Promise<Router> {
+  return createRouter({
+    logger: env.logger,
+    config: env.config,
+  });
+}
+```
+
+3. Add the plugin to your backend:
+
+```typescript
+// In packages/backend/src/index.ts
+import buildandburn from './plugins/buildandburn';
+
+// Add to your service builders
+const buildandburnEnv = useHotMemoize(module, () => createEnv('buildandburn'));
+apiRouter.use('/buildandburn', await buildandburn(buildandburnEnv));
+```
+
+## Configuration
+
+Add the following to your Backstage `app-config.yaml`:
+
+```yaml
+github:
+  token: ${GITHUB_TOKEN}
+
+backend:
+  baseUrl: http://localhost:7007
+```
+
+You will need to provide a GitHub personal access token with the `repo` and `workflow` scopes to enable GitHub Actions integration.
 
 ## Usage
 
 Once installed, you can access the Build and Burn UI from the sidebar. The UI allows you to:
 
-1. Create new environments using YAML manifest files
+1. Create new environments using:
+   - Direct YAML manifest entry
+   - GitHub Actions workflows
 2. View all your active environments
 3. Get detailed information about each environment
-4. Destroy environments when no longer needed
+4. Monitor GitHub Actions workflow runs
+5. View workflow logs in real-time
+6. Destroy environments when no longer needed
 
-## API Backend
+For detailed usage instructions, see:
+- [GitHub Actions Integration](./github-actions-integration.md)
+- [Template Usage](./template-usage.md)
 
-For the plugin to work, you'll need to implement a backend API that follows the endpoints expected by the Build and Burn client. The main endpoints are:
+## API Endpoints
 
-- `GET /api/buildandburn/environments` - List all environments
-- `GET /api/buildandburn/environments/{id}` - Get details of a specific environment
-- `POST /api/buildandburn/environments` - Create a new environment
-- `DELETE /api/buildandburn/environments/{id}` - Destroy an environment
+The backend plugin provides the following REST endpoints:
 
-The backend should interact with the Build and Burn CLI tool to manage the environments.
+- `GET /api/buildandburn/environments`: List all environments
+- `GET /api/buildandburn/environments/{id}`: Get details of a specific environment
+- `POST /api/buildandburn/environments`: Create a new environment
+- `DELETE /api/buildandburn/environments/{id}`: Destroy an environment
+- `POST /api/buildandburn/github-actions/workflow`: Trigger a GitHub Actions workflow
+- `GET /api/buildandburn/github-actions/workflow-runs`: Get workflow runs
+- `GET /api/buildandburn/github-actions/workflow-runs/{runId}`: Get a specific workflow run
+- `GET /api/buildandburn/github-actions/workflow-runs/{runId}/logs`: Get logs for a workflow run
 
-## Example Backend Implementation
+## Troubleshooting
 
-You can implement a simple backend in your Backstage instance using the `backend` package:
+If you encounter issues with the plugin:
 
-```typescript
-// packages/backend/src/plugins/buildandburn.ts
-import { createRouter } from '@backstage/backend-common';
-import { Request, Response, Router } from 'express';
-import { spawn } from 'child_process';
-import { Logger } from 'winston';
+1. **Plugin Not Appearing**: Check that it's properly added to App.tsx and Root.tsx
+2. **API Connection Errors**: Verify the backend plugin is properly registered
+3. **GitHub Integration Issues**: Ensure your GitHub token has the required scopes
+4. **Missing Workflow Files**: Check that repositories have the correct workflow files
 
-export default async function createPlugin(
-  router: Router,
-  logger: Logger,
-): Promise<Router> {
-  // Add routes here...
+## Contributing
 
-  return router;
-}
-```
-
-Then register the plugin in `packages/backend/src/index.ts`:
-
-```typescript
-import buildandburn from './plugins/buildandburn';
-
-// ...
-
-const buildandburnEnv = useHotMemoize(module, () => createEnv('buildandburn'));
-apiRouter.use('/buildandburn', await buildandburn(buildandburnEnv));
-```
-
-For a complete backend implementation, see the full example in the `backend` directory of the Build and Burn plugin.
+For information on contributing to the Build and Burn project, please see the [CONTRIBUTING.md](../../CONTRIBUTING.md) file in the root of the repository.
 
 ## License
 
-MIT 
+This plugin is licensed under the Apache 2.0 License. 

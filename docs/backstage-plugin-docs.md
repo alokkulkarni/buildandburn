@@ -1,270 +1,350 @@
 # Build and Burn Backstage Plugin
 
-## Overview
+The Build and Burn Backstage plugin integrates the Build and Burn system with Backstage, allowing you to create, manage, and monitor disposable Kubernetes environments directly from your developer portal.
 
-The Build and Burn Backstage Plugin is a frontend integration that connects the Backstage developer portal with the Build and Burn CLI tool. It provides a user-friendly interface for developers to create, manage, and destroy ephemeral Kubernetes environments directly from within Backstage.
+## Features
 
-## Purpose
-
-The plugin serves as a web-based management interface for the Build and Burn system, enabling developers to:
-
-1. Create disposable Kubernetes environments using YAML manifests
-2. Monitor the status of active environments
-3. Get detailed information about running environments, including access points and service endpoints
-4. Destroy environments when no longer needed
-
-This integration makes the Build and Burn functionality accessible through Backstage's unified developer portal, eliminating the need for developers to use the CLI directly.
+- Create environments directly from manifest YAML
+- Trigger GitHub Actions workflows to manage environments
+- Monitor GitHub Actions workflow runs in real-time
+- View environment details and access information
+- Destroy environments when no longer needed
+- Real-time log viewing for workflow runs
 
 ## Architecture
 
-The Backstage plugin follows a client-server architecture:
+The plugin consists of two main components:
 
-1. **Frontend Plugin**: A React-based UI that integrates with the Backstage UI framework
-2. **Backend API**: REST endpoints that communicate with the Build and Burn CLI tool
+1. **Frontend Plugin**: User interface components for Backstage
+   - Environment management page
+   - Manifest creation dialog
+   - GitHub Actions workflow monitoring
+   - Log viewer
 
-### Frontend Components
+2. **Backend Plugin**: Server-side components that:
+   - Interface with GitHub Actions API
+   - Manage environment metadata
+   - Process manifests
+   - Handle authentication and permissions
 
-The plugin consists of the following key components:
+### Integration Points
 
-- **BuildAndBurnPage**: The main page component that displays a list of environments and details
-- **ManifestDialog**: A dialog for creating new environments by submitting YAML manifests
-- **BuildAndBurnClient**: An API client that communicates with the backend
+The plugin integrates with several systems:
 
-### Backend Integration
-
-The plugin requires a backend service that exposes these REST endpoints:
-
-- `GET /api/buildandburn/environments` - List all environments
-- `GET /api/buildandburn/environments/{id}` - Get details of a specific environment
-- `POST /api/buildandburn/environments` - Create a new environment
-- `DELETE /api/buildandburn/environments/{id}` - Destroy an environment
-
-The backend implementation calls the Build and Burn CLI with appropriate parameters:
-
-```bash
-# List environments
-buildandburn list
-
-# Get environment info
-buildandburn info --env-id <id>
-
-# Create environment
-buildandburn up --manifest <manifest-file>
-
-# Destroy environment
-buildandburn down --env-id <id>
-```
-
-## Data Model
-
-The plugin works with the following data models:
-
-- **Environment**: Represents a running Build and Burn environment
-  - id: Unique identifier
-  - name: Name of the environment
-  - createdAt: Timestamp when created
-  - status: Current status (active, creating, destroying, failed)
-  - services: Deployed services and their endpoints
-  - database: Database connection information (if applicable)
-  - messageQueue: Message queue information (if applicable)
-
-## User Workflow
-
-1. **Creating an Environment**:
-   - User clicks "Create Environment" button
-   - User enters a YAML manifest defining the environment
-   - Backend calls `buildandburn up --manifest <file>` with the manifest
-   - UI refreshes to show the new environment
-
-2. **Viewing Environment Details**:
-   - User clicks on an environment in the list
-   - Backend calls `buildandburn info --env-id <id>` with the environment ID
-   - UI displays detailed information about the environment
-
-3. **Destroying an Environment**:
-   - User clicks "Destroy" button for an environment
-   - Backend calls `buildandburn down --env-id <id>` with the environment ID
-   - UI refreshes to remove the destroyed environment
+- **Backstage Core**: For UI components and API integration
+- **GitHub Actions**: For triggering and monitoring workflows
+- **Build and Burn CLI**: Indirectly through GitHub Actions workflows
 
 ## Installation
 
-### Frontend
+### Prerequisites
 
-1. Install the plugin in your Backstage app:
-   ```bash
-   yarn add --cwd packages/app @internal/plugin-buildandburn
-   ```
+Before installing the plugin, ensure you have:
 
-2. Add the plugin to your Backstage app routes:
-   ```tsx
-   import { BuildAndBurnPage } from '@internal/plugin-buildandburn';
-   
-   // Add to the FlatRoutes
-   <Route path="/build-and-burn" element={<BuildAndBurnPage />} />
-   ```
+1. A running Backstage instance (version 1.0.0 or higher)
+2. Node.js 14+ (16+ recommended)
+3. Yarn
+4. GitHub repositories with Build and Burn workflows configured
+5. GitHub personal access token with `repo` and `workflow` scopes
+
+### Frontend Plugin Installation
+
+1. Install the plugin package in your Backstage app:
+
+```bash
+# From your Backstage root directory
+yarn add --cwd packages/app @internal/plugin-buildandburn
+```
+
+2. Add the plugin to your Backstage app:
+
+```tsx
+// In packages/app/src/App.tsx
+import { BuildAndBurnPage } from '@internal/plugin-buildandburn';
+
+// Add to your routes
+<Route path="/build-and-burn" element={<BuildAndBurnPage />} />
+```
 
 3. Add the plugin to your sidebar:
-   ```tsx
-   import BuildIcon from '@material-ui/icons/Build';
-   
-   // Add to the sidebar items
-   <SidebarItem icon={BuildIcon} to="build-and-burn" text="Build & Burn" />
-   ```
 
-4. Register the API client:
-   ```ts
-   import { BuildAndBurnClient, buildAndBurnApiRef } from '@internal/plugin-buildandburn';
-   
-   // Add to the ApiFactories
-   createApiFactory({
-     api: buildAndBurnApiRef,
-     deps: { configApi: configApiRef },
-     factory: ({ configApi }) => new BuildAndBurnClient({
-       baseUrl: configApi.getString('buildandburn.baseUrl'),
-     }),
-   })
-   ```
+```tsx
+// In packages/app/src/components/Root/Root.tsx
+import BuildIcon from '@material-ui/icons/Build';
 
-### Backend
+// Add to your sidebar items
+<SidebarItem icon={BuildIcon} to="build-and-burn" text="Build & Burn" />
+```
 
-Create a backend plugin that implements the required API endpoints:
+4. Register the API:
+
+```tsx
+// In packages/app/src/apis.ts
+import { buildAndBurnApiRef, BuildAndBurnClient } from '@internal/plugin-buildandburn';
+
+// Add to your API factories
+createApiFactory({
+  api: buildAndBurnApiRef,
+  deps: { configApi: configApiRef },
+  factory: ({ configApi }) => new BuildAndBurnClient({
+    baseUrl: configApi.getString('backend.baseUrl') + '/api/buildandburn',
+  }),
+})
+```
+
+### Backend Plugin Installation
+
+1. Create a backend plugin in your Backstage backend:
+
+```bash
+# From your Backstage root directory
+yarn new --select backend-plugin --option id=buildandburn
+```
+
+2. Add the Build and Burn API routes to your backend:
 
 ```typescript
-// packages/backend/src/plugins/buildandburn.ts
-import { createRouter } from '@backstage/backend-common';
-import { Router } from 'express';
-import { spawn } from 'child_process';
-import { Logger } from 'winston';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
+// In packages/backend/src/plugins/buildandburn.ts
+import { createRouter } from '@internal/plugin-buildandburn/src/backend';
+import { PluginEnvironment } from '../types';
 
 export default async function createPlugin(
-  router: Router,
-  logger: Logger,
+  env: PluginEnvironment,
 ): Promise<Router> {
-  const cliPath = process.env.BUILDANDBURN_CLI_PATH || 'buildandburn';
-  const workDir = process.env.BUILDANDBURN_WORK_DIR || path.join(os.homedir(), '.buildandburn');
-  
-  // List all environments
-  router.get('/environments', async (req, res) => {
-    try {
-      const { stdout } = await executeCommand(cliPath, ['list', '--json']);
-      const environments = JSON.parse(stdout);
-      res.json(environments);
-    } catch (error) {
-      logger.error(`Failed to list environments: ${error}`);
-      res.status(500).json({ error: 'Failed to list environments' });
-    }
+  return createRouter({
+    logger: env.logger,
+    config: env.config,
   });
-  
-  // Get environment details
-  router.get('/environments/:id', async (req, res) => {
-    try {
-      const { stdout } = await executeCommand(cliPath, ['info', '--env-id', req.params.id, '--json']);
-      const environment = JSON.parse(stdout);
-      res.json(environment);
-    } catch (error) {
-      logger.error(`Failed to get environment: ${error}`);
-      res.status(500).json({ error: 'Failed to get environment' });
-    }
-  });
-  
-  // Create environment
-  router.post('/environments', async (req, res) => {
-    try {
-      const { manifest } = req.body;
-      const manifestFile = path.join(os.tmpdir(), `manifest-${Date.now()}.yaml`);
-      
-      // Write manifest to temporary file
-      fs.writeFileSync(manifestFile, manifest);
-      
-      // Create environment
-      const { stdout } = await executeCommand(
-        cliPath, 
-        ['up', '--manifest', manifestFile, '--json']
-      );
-      
-      // Parse output
-      const environment = JSON.parse(stdout);
-      
-      // Cleanup
-      fs.unlinkSync(manifestFile);
-      
-      res.json(environment);
-    } catch (error) {
-      logger.error(`Failed to create environment: ${error}`);
-      res.status(500).json({ error: 'Failed to create environment' });
-    }
-  });
-  
-  // Destroy environment
-  router.delete('/environments/:id', async (req, res) => {
-    try {
-      await executeCommand(cliPath, ['down', '--env-id', req.params.id, '--auto-approve']);
-      res.json({ success: true });
-    } catch (error) {
-      logger.error(`Failed to destroy environment: ${error}`);
-      res.status(500).json({ error: 'Failed to destroy environment' });
-    }
-  });
-  
-  return router;
 }
+```
 
-function executeCommand(command, args) {
-  return new Promise((resolve, reject) => {
-    const process = spawn(command, args);
-    let stdout = '';
-    let stderr = '';
-    
-    process.stdout.on('data', (data) => { stdout += data.toString(); });
-    process.stderr.on('data', (data) => { stderr += data.toString(); });
-    
-    process.on('close', (code) => {
-      if (code === 0) {
-        resolve({ stdout, stderr });
-      } else {
-        reject(new Error(`Command failed with code ${code}: ${stderr}`));
-      }
-    });
-  });
-}
+3. Add the plugin to your backend:
+
+```typescript
+// In packages/backend/src/index.ts
+import buildandburn from './plugins/buildandburn';
+
+// Add to your service builders
+const buildandburnEnv = useHotMemoize(module, () => createEnv('buildandburn'));
+apiRouter.use('/buildandburn', await buildandburn(buildandburnEnv));
 ```
 
 ## Configuration
 
-Add the following to your Backstage app-config.yaml:
+Add the following to your Backstage `app-config.yaml`:
 
 ```yaml
-backend:
-  env:
-    BUILDANDBURN_CLI_PATH: /usr/local/bin/buildandburn
-    BUILDANDBURN_WORK_DIR: /var/lib/backstage/buildandburn
+github:
+  token: ${GITHUB_TOKEN}
 
-buildandburn:
-  baseUrl: http://localhost:7007/api/buildandburn
+backend:
+  baseUrl: http://localhost:7007
 ```
 
-The plugin requires the Build and Burn CLI to be installed on the Backstage backend server. Ensure that the CLI and all its dependencies (Terraform, kubectl, etc.) are properly installed and configured.
+You will need to provide a GitHub personal access token with the `repo` and `workflow` scopes to enable GitHub Actions integration.
 
-## Security Considerations
+For production deployments, ensure you:
 
-- The backend should validate manifest files before executing them
-- Access to the plugin should be restricted to authorized users via Backstage permissions
-- Environment lifecycle should be monitored to avoid resource leaks
-- AWS credentials must be securely managed on the backend server
+1. Store tokens securely using environment variables
+2. Configure proper CORS settings if your frontend and backend are on different domains
+3. Set up proper authentication for the API endpoints
+
+## Usage
+
+### Creating an Environment
+
+There are two ways to create environments:
+
+#### Direct Manifest Creation
+
+1. Navigate to the Build and Burn page
+2. Click the "Create Environment" button
+3. Select the "Direct Manifest" tab
+4. Enter your environment manifest in YAML format
+5. Click "Create"
+
+This method directly creates an environment using the backend API without GitHub Actions.
+
+#### GitHub Actions Workflow
+
+1. Navigate to the Build and Burn page
+2. Click the "Create Environment" button
+3. Select the "GitHub Actions" tab
+4. Enter the GitHub repository owner and name
+5. Select "Create Environment (up)" action
+6. Enter the path to your manifest file in the repository
+7. Configure optional parameters:
+   - Skip K8s Generation
+   - Dry Run
+8. Click "Trigger Workflow"
+
+This method triggers a GitHub Actions workflow in the specified repository, which will create the environment.
+
+### Monitoring Environment Status
+
+The main page shows a list of all environments with their:
+
+- ID
+- Name
+- Creation timestamp
+- Current status
+- GitHub repository (if created via GitHub Actions)
+- Actions (Details, Workflows, Destroy)
+
+### Viewing Environment Details
+
+Click the "Details" button on an environment to see:
+
+- Service endpoints
+- Database connection information
+- Message queue details
+- Associated GitHub repository
+
+### Managing GitHub Actions Workflows
+
+When you trigger a GitHub Actions workflow or click the "Workflows" button on an environment:
+
+1. The plugin switches to the "GitHub Workflows" tab
+2. Shows all workflow runs for the repository
+3. Displays status, creation time, and available actions
+4. Auto-refreshes active workflows every 10 seconds
+
+### Viewing Workflow Logs
+
+To view detailed logs from a workflow run:
+
+1. Click "View Logs" on a workflow run
+2. The plugin shows logs from all jobs in the workflow
+3. For in-progress workflows, use "Refresh" to get the latest logs
+
+### Destroying an Environment
+
+1. Click the "Destroy" button on an environment
+2. Confirm the destruction
+3. If the environment is linked to a GitHub repository:
+   - The plugin triggers a GitHub Actions workflow with the "down" action
+   - The workflow destroys the environment resources
+4. Otherwise, the environment is destroyed directly via the backend API
+
+## GitHub Actions Integration
+
+The plugin integrates with GitHub Actions to create and manage environments.
+
+Key points:
+
+1. Workflows must be named `buildandburn.yml` and located in `.github/workflows/`
+2. The plugin supports the following actions:
+   - `up`: Create an environment
+   - `down`: Destroy an environment
+   - `info`: Get environment information
+   - `list`: List all environments
+
+## Development
+
+### Setting Up the Development Environment
+
+1. Clone the repository
+2. Install dependencies:
+   ```bash
+   yarn install
+   ```
+3. Start the development server:
+   ```bash
+   yarn start
+   ```
+
+### Testing
+
+```bash
+yarn test
+```
+
+This runs:
+- Unit tests for frontend components
+- Unit tests for API client
+- Integration tests for GitHub Actions API
+
+### Building for Production
+
+```bash
+yarn build
+```
+
+This creates a production-ready build in the `dist` directory.
 
 ## Troubleshooting
 
-Common issues:
+### Common Issues and Solutions
 
-1. **Connection errors**: Check that the backend API is running and accessible
-2. **CLI not found**: Ensure the Build and Burn CLI is installed and in the PATH of the backend server
-3. **Permission errors**: Verify the backend has permissions to execute the CLI
-4. **Missing dependencies**: Check that Terraform, kubectl, and other dependencies are installed
-5. **Invalid manifests**: Verify that submitted YAML adheres to the required format
+1. **GitHub Token Issues**:
+   - Ensure your GitHub token has the `repo` and `workflow` scopes
+   - Check that the token is correctly configured in `app-config.yaml`
+   - Verify the token is not expired
 
-For detailed error logs, check:
-- Backstage backend logs
-- Build and Burn logs in `~/.buildandburn/` or your configured work directory 
+2. **Missing Workflow File**:
+   - Ensure the repository contains a `.github/workflows/buildandburn.yml` file
+   - Check that the workflow file is properly configured with inputs for action, manifestPath, etc.
+
+3. **Backend Connection Issues**:
+   - Verify the backend plugin is properly registered
+   - Check that the baseUrl in your Backstage configuration is correct
+   - Ensure CORS is properly configured if needed
+
+4. **Workflow Trigger Failures**:
+   - Check that the repository owner and name are correct
+   - Verify that you have permission to trigger workflows in the repository
+   - Check the workflow file for errors
+
+### Debugging
+
+The plugin includes debug logging that can be enabled:
+
+1. In the browser console, set `localStorage.debug = '*'`
+2. Reload the page
+3. Check the console for detailed log messages
+
+For backend issues, check the Backstage backend logs.
+
+## API Reference
+
+### Frontend API
+
+The plugin provides a `BuildAndBurnApi` interface with the following methods:
+
+- `listEnvironments()`: List all environments
+- `getEnvironment(id)`: Get details for a specific environment
+- `createEnvironment(manifest)`: Create a new environment
+- `destroyEnvironment(id)`: Destroy an environment
+- `triggerGithubWorkflow(options)`: Trigger a GitHub Actions workflow
+- `getWorkflowRuns(repo)`: Get all workflow runs for a repository
+- `getWorkflowRunLogs(runId, repo)`: Get logs for a workflow run
+- `getWorkflowRunStatus(runId, repo)`: Get the status of a workflow run
+
+### Backend API
+
+The backend plugin provides the following REST endpoints:
+
+- `GET /api/buildandburn/environments`: List all environments
+- `GET /api/buildandburn/environments/:id`: Get a specific environment
+- `POST /api/buildandburn/environments`: Create a new environment
+- `DELETE /api/buildandburn/environments/:id`: Delete an environment
+- `POST /api/buildandburn/github-actions/workflow`: Trigger a GitHub Actions workflow
+- `GET /api/buildandburn/github-actions/workflow-runs`: Get workflow runs
+- `GET /api/buildandburn/github-actions/workflow-runs/:runId`: Get a specific workflow run
+- `GET /api/buildandburn/github-actions/workflow-runs/:runId/logs`: Get logs for a workflow run
+
+## Contributing
+
+Contributions to the plugin are welcome! Please follow these steps:
+
+1. Create an issue describing the feature or bug fix
+2. Fork the repository
+3. Create a branch for your changes (`git checkout -b feature/amazing-feature`)
+4. Make your changes, including tests
+5. Submit a pull request
+
+For more details on contributing to the Build and Burn project as a whole, see the [CONTRIBUTING.md](../CONTRIBUTING.md) file in the root of the repository.
+
+## License
+
+This plugin is licensed under the Apache 2.0 License. 

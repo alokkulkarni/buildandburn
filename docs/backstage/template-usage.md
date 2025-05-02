@@ -30,7 +30,7 @@ The template wizard will guide you through the following steps:
 ### Step 2: Environment Configuration
 
 - **Environment Name**: Enter a name for your environment (used in resource naming)
-- **AWS Region**: Select the AWS region where the environment will be deployed
+- **AWS Region**: Select the AWS region where the environment will be deployed (default: eu-west-2)
 
 ### Step 3: Service Configuration
 
@@ -82,6 +82,24 @@ Once the template has completed, you can manage your environment through:
 1. **GitHub Actions**: Use the workflow in the created repository to create, destroy, and manage environments
 2. **Build and Burn Plugin**: Use the Backstage plugin to view and manage environments
 
+## Workflow Commands
+
+The generated repository includes GitHub Actions workflows that support the following commands:
+
+```bash
+# Create an environment
+gh workflow run buildandburn.yml -f action=up -f manifestPath=manifest.yaml
+
+# Get information about an environment
+gh workflow run buildandburn.yml -f action=info -f envId=<environment-id>
+
+# List all environments
+gh workflow run buildandburn.yml -f action=list
+
+# Destroy an environment
+gh workflow run buildandburn.yml -f action=down -f envId=<environment-id>
+```
+
 ## Troubleshooting
 
 If you encounter issues with the template or the created environment:
@@ -99,4 +117,8 @@ Here's a typical workflow for using the template:
 2. Go to the created GitHub repository
 3. Run the GitHub Actions workflow to create the environment
 4. Use the environment for development or testing
-5. When finished, run the workflow again to destroy the environment 
+5. When finished, run the workflow again to destroy the environment
+
+## Contributing
+
+For information on contributing to the Build and Burn project, please see the [CONTRIBUTING.md](../../CONTRIBUTING.md) file in the root of the repository. 

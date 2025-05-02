@@ -819,6 +819,7 @@ def provision_infrastructure(manifest, env_id, terraform_dir, args=None):
     if args is None:
         class DefaultArgs:
             auto_approve = False
+            skip_module_confirmation = False
         args = DefaultArgs()
         
     print_info("=" * 80)
@@ -901,7 +902,7 @@ terraform {{
     
     # If validation fails because of missing core modules, stop execution
     if not tf_modules_valid and validation_results.get("modules", {}).get("missing"):
-        print_error("Terraform modules validation failed. The required modules for this deployment are not available.")
+        print_error("Terraform modules validation failed. The required core modules for this deployment are not available.")
         print_info("\nDetailed Validation Results:")
         print(json.dumps(validation_results, indent=2))
         
@@ -918,6 +919,22 @@ terraform {{
         print_info("Please fix the issues and try again.")
         
         return project_dir, {}
+    
+    # Check for missing policy modules and prompt for confirmation
+    missing_policy_modules = validation_results.get("policy_modules", {}).get("missing", [])
+    if missing_policy_modules and (not hasattr(args, 'skip_module_confirmation') or not args.skip_module_confirmation):
+        print_warning("\nThe following policy modules are missing but might be needed for your deployment:")
+        for module in missing_policy_modules:
+            print_warning(f"- {module}")
+        
+        print_warning("\nMissing policy modules may result in connectivity issues between services.")
+        
+        if hasattr(args, 'auto_approve') and args.auto_approve:
+            print_info("Auto-approve enabled, continuing despite missing policy modules.")
+        else:
+            if input("\nDo you want to continue with missing policy modules? (y/N): ").lower() != 'y':
+                print_info("Deployment aborted by user due to missing policy modules.")
+                return project_dir, {}
     
     # If validation identified missing policy modules that can be auto-fixed, try to fix them
     if validation_results.get("auto_fixable", False) and validation_results.get("fix_actions"):
@@ -2592,7 +2609,7 @@ def cmd_up(args):
             print_error(f"Kubernetes resources validation failed: {str(e)}")
             return False
     
-    # Provision infrastructure
+    # Provision infrastructure - pass the skip_module_confirmation flag
     project_dir, tf_output = provision_infrastructure(manifest, env_id, terraform_dir, args=args)
     
     # Check if infrastructure provisioning was successful
@@ -4064,6 +4081,7 @@ def main():
     parser_up.add_argument('-a', '--auto-approve', action='store_true', help='Auto-approve Terraform operations')
     parser_up.add_argument('--no-generate-k8s', action='store_true', help='Disable automatic generation of Kubernetes resources')
     parser_up.add_argument('--dry-run', action='store_true', help='Validate configuration without creating resources')
+    parser_up.add_argument('--skip-module-confirmation', action='store_true', help='Skip confirmation when policy modules or required modules are missing')
     parser_up.set_defaults(func=cmd_up)
     
     # Down command

@@ -1,0 +1,255 @@
+# Example main.tf showing integration with all policy modules
+# This is a reference file, not intended to be used directly
+
+locals {
+  project_name = var.project_name
+  env_id       = var.env_id
+  account_id   = data.aws_caller_identity.current.account_id
+  tags = {
+    Project     = var.project_name
+    Environment = var.env_id
+    ManagedBy   = "terraform"
+  }
+}
+
+data "aws_caller_identity" "current" {}
+
+# VPC Module
+module "vpc" {
+  source = "./modules/vpc"
+  
+  project_name = local.project_name
+  env_id       = local.env_id
+  cidr_block   = var.vpc_cidr
+  region       = var.region
+  tags         = local.tags
+}
+
+# EKS Module
+module "eks" {
+  source = "./modules/eks"
+  
+  project_name     = local.project_name
+  env_id           = local.env_id
+  vpc_id           = module.vpc.vpc_id
+  subnet_ids       = module.vpc.private_subnet_ids
+  instance_types   = var.eks_instance_types
+  node_min         = var.eks_node_min
+  node_max         = var.eks_node_max
+  k8s_version      = var.k8s_version
+  tags             = local.tags
+  
+  depends_on = [module.vpc]
+}
+
+# RDS Module (conditional)
+module "rds" {
+  source = "./modules/rds"
+  count  = contains(var.dependencies, "database") ? 1 : 0
+  
+  project_name        = local.project_name
+  env_id              = local.env_id
+  vpc_id              = module.vpc.vpc_id
+  subnet_ids          = module.vpc.private_subnet_ids
+  engine              = var.db_engine
+  engine_version      = var.db_engine_version
+  instance_class      = var.db_instance_class
+  allocated_storage   = var.db_allocated_storage
+  eks_security_group_id = module.eks.node_security_group_id
+  tags                = local.tags
+  
+  depends_on = [module.vpc, module.eks]
+}
+
+# ElastiCache Module (conditional)
+module "elasticache" {
+  source = "./modules/elasticache"
+  count  = contains(var.dependencies, "redis") ? 1 : 0
+  
+  project_name        = local.project_name
+  env_id              = local.env_id
+  vpc_id              = module.vpc.vpc_id
+  subnet_ids          = module.vpc.private_subnet_ids
+  node_type           = var.redis_node_type
+  engine_version      = var.redis_engine_version
+  cluster_size        = var.redis_cluster_size
+  auth_enabled        = var.redis_auth_enabled
+  multi_az_enabled    = var.redis_multi_az_enabled
+  eks_security_group_id = module.eks.node_security_group_id
+  tags                = local.tags
+  
+  depends_on = [module.vpc, module.eks]
+}
+
+# MQ Module (conditional)
+module "mq" {
+  source = "./modules/mq"
+  count  = contains(var.dependencies, "queue") ? 1 : 0
+  
+  project_name        = local.project_name
+  env_id              = local.env_id
+  vpc_id              = module.vpc.vpc_id
+  subnet_ids          = module.vpc.private_subnet_ids
+  engine_type         = var.mq_engine_type
+  engine_version      = var.mq_engine_version
+  instance_type       = var.mq_instance_type
+  eks_security_group_id = module.eks.node_security_group_id
+  tags                = local.tags
+  
+  depends_on = [module.vpc, module.eks]
+}
+
+# Policy Modules for connectivity
+
+# EKS to RDS Policy (conditional)
+module "eks_to_rds_policy" {
+  source = "./modules/eks-to-rds-policy"
+  count  = contains(var.dependencies, "database") ? 1 : 0
+  
+  project_name   = local.project_name
+  env_id         = local.env_id
+  region         = var.region
+  account_id     = local.account_id
+  node_role_name = module.eks.node_role_name
+  tags           = local.tags
+  
+  depends_on = [module.eks]
+}
+
+# EKS to ElastiCache Policy (conditional)
+module "eks_to_elasticache_policy" {
+  source = "./modules/eks-to-elasticache-policy"
+  count  = contains(var.dependencies, "redis") ? 1 : 0
+  
+  project_name   = local.project_name
+  env_id         = local.env_id
+  region         = var.region
+  account_id     = local.account_id
+  node_role_name = module.eks.node_role_name
+  tags           = local.tags
+  
+  depends_on = [module.eks]
+}
+
+# EKS to MQ Policy (conditional)
+module "eks_to_mq_policy" {
+  source = "./modules/eks-to-mq-policy"
+  count  = contains(var.dependencies, "queue") ? 1 : 0
+  
+  project_name   = local.project_name
+  env_id         = local.env_id
+  region         = var.region
+  account_id     = local.account_id
+  node_role_name = module.eks.node_role_name
+  tags           = local.tags
+  
+  depends_on = [module.eks]
+}
+
+# NEW Access Policy Modules
+
+# RDS Full Access Policy (conditional)
+module "rds_full_access_policy" {
+  source = "./modules/rds-full-access-policy"
+  count  = contains(var.dependencies, "database") ? 1 : 0
+  
+  project_name   = local.project_name
+  env_id         = local.env_id
+  region         = var.region
+  account_id     = local.account_id
+  node_role_name = module.eks.node_role_name
+  tags           = local.tags
+  
+  depends_on = [module.eks]
+}
+
+# RDS Write Access Policy (conditional - optional)
+module "rds_write_access_policy" {
+  source = "./modules/rds-write-access-policy"
+  count  = contains(var.dependencies, "database") ? 0 : 0  # Default disabled, enable as needed
+  
+  project_name   = local.project_name
+  env_id         = local.env_id
+  region         = var.region
+  account_id     = local.account_id
+  node_role_name = module.eks.node_role_name
+  tags           = local.tags
+  
+  depends_on = [module.eks]
+}
+
+# ElastiCache Full Access Policy (conditional)
+module "elasticache_full_access_policy" {
+  source = "./modules/elasticache-full-access-policy"
+  count  = contains(var.dependencies, "redis") ? 1 : 0
+  
+  project_name   = local.project_name
+  env_id         = local.env_id
+  region         = var.region
+  account_id     = local.account_id
+  node_role_name = module.eks.node_role_name
+  tags           = local.tags
+  
+  depends_on = [module.eks]
+}
+
+# ElastiCache Write Access Policy (conditional - optional)
+module "elasticache_write_access_policy" {
+  source = "./modules/elasticache-write-access-policy"
+  count  = contains(var.dependencies, "redis") ? 0 : 0  # Default disabled, enable as needed
+  
+  project_name   = local.project_name
+  env_id         = local.env_id
+  region         = var.region
+  account_id     = local.account_id
+  node_role_name = module.eks.node_role_name
+  tags           = local.tags
+  
+  depends_on = [module.eks]
+}
+
+# MQ Full Access Policy (conditional)
+module "mq_full_access_policy" {
+  source = "./modules/mq-full-access-policy"
+  count  = contains(var.dependencies, "queue") ? 1 : 0
+  
+  project_name   = local.project_name
+  env_id         = local.env_id
+  region         = var.region
+  account_id     = local.account_id
+  node_role_name = module.eks.node_role_name
+  tags           = local.tags
+  
+  depends_on = [module.eks]
+}
+
+# MQ Write Access Policy (conditional - optional)
+module "mq_write_access_policy" {
+  source = "./modules/mq-write-access-policy"
+  count  = contains(var.dependencies, "queue") ? 0 : 0  # Default disabled, enable as needed
+  
+  project_name   = local.project_name
+  env_id         = local.env_id
+  region         = var.region
+  account_id     = local.account_id
+  node_role_name = module.eks.node_role_name
+  tags           = local.tags
+  
+  depends_on = [module.eks]
+}
+
+# Set up the Kubernetes provider to use the EKS cluster
+provider "kubernetes" {
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_ca_certificate)
+  token                  = module.eks.cluster_auth_token
+}
+
+# Set up the Helm provider
+provider "helm" {
+  kubernetes {
+    host                   = module.eks.cluster_endpoint
+    cluster_ca_certificate = base64decode(module.eks.cluster_ca_certificate)
+    token                  = module.eks.cluster_auth_token
+  }
+} 

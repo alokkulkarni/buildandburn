@@ -922,10 +922,18 @@ terraform {{
     
     # Check for missing policy modules and prompt for confirmation
     missing_policy_modules = validation_results.get("policy_modules", {}).get("missing", [])
-    if missing_policy_modules and (not hasattr(args, 'skip_module_confirmation') or not args.skip_module_confirmation):
-        print_warning("\nThe following policy modules are missing but might be needed for your deployment:")
-        for module in missing_policy_modules:
-            print_warning(f"- {module}")
+    missing_access_policy_modules = validation_results.get("access_policy_modules", {}).get("missing", [])
+    
+    if (missing_policy_modules or missing_access_policy_modules) and (not hasattr(args, 'skip_module_confirmation') or not args.skip_module_confirmation):
+        if missing_policy_modules:
+            print_warning("\nThe following policy modules are missing but might be needed for your deployment:")
+            for module in missing_policy_modules:
+                print_warning(f"- {module}")
+        
+        if missing_access_policy_modules:
+            print_warning("\nThe following access policy modules are missing but might be needed for your deployment:")
+            for module in missing_access_policy_modules:
+                print_warning(f"- {module}")
         
         print_warning("\nMissing policy modules may result in connectivity issues between services.")
         
@@ -944,7 +952,8 @@ terraform {{
         original_modules_dir = os.path.join(terraform_dir, "modules")
         project_modules_dir = os.path.join(terraform_project_dir, "modules")
         
-        for policy_module in validation_results.get("policy_modules", {}).get("missing", []):
+        # Copy missing standard policy modules
+        for policy_module in missing_policy_modules:
             original_module_path = os.path.join(original_modules_dir, policy_module)
             project_module_path = os.path.join(project_modules_dir, policy_module)
             
@@ -952,6 +961,16 @@ terraform {{
                 print_info(f"Copying {policy_module} module from original terraform directory...")
                 shutil.copytree(original_module_path, project_module_path)
                 print_success(f"Copied {policy_module} module to project terraform directory")
+        
+        # Copy missing access policy modules
+        for access_policy_module in missing_access_policy_modules:
+            original_module_path = os.path.join(original_modules_dir, access_policy_module)
+            project_module_path = os.path.join(project_modules_dir, access_policy_module)
+            
+            if os.path.exists(original_module_path) and not os.path.exists(project_module_path):
+                print_info(f"Copying {access_policy_module} module from original terraform directory...")
+                shutil.copytree(original_module_path, project_module_path)
+                print_success(f"Copied {access_policy_module} module to project terraform directory")
         
         # Apply fixes to main.tf
         fixed = apply_terraform_module_fixes(validation_results, terraform_project_dir)
@@ -3708,14 +3727,15 @@ def validate_terraform_modules_against_manifest(manifest, terraform_project_dir)
             "missing": [],
             "available": [],
         },
-        "iam_policies": {
+        "access_policy_modules": {
             "required": [],
             "missing": [],
             "available": [],
         },
-        "dependencies": {
+        "iam_policies": {
             "required": [],
             "missing": [],
+            "available": [],
             "connection_issues": []
         },
         "summary": "",
@@ -4029,8 +4049,28 @@ def apply_terraform_module_fixes(validation_results, terraform_project_dir):
                     with open(main_tf_path, 'r') as f:
                         content = f.read()
                     
-                    # Create module block to add
-                    module_block = f"""
+                    # Create module block to add based on module type
+                    if "full-access" in module_name or "write-access" in module_name:
+                        # This is an access policy module
+                        module_block = f"""
+# Conditionally create {module_name} if {dependency} is requested
+module "{module_var_name}" {{
+  source = "./modules/{module_name}"
+  count  = contains(var.dependencies, "{dependency}") ? 1 : 0
+  
+  project_name   = local.project_name
+  env_id         = local.env_id
+  region         = var.region
+  account_id     = local.account_id
+  node_role_name = module.eks.node_role_name
+  tags           = local.tags
+  
+  depends_on = [module.eks]
+}}
+"""
+                    else:
+                        # This is a standard policy module
+                        module_block = f"""
 # Conditionally create {module_name} if {dependency} is requested
 module "{module_var_name}" {{
   source = "./modules/{module_name}"
@@ -4063,6 +4103,10 @@ module "{module_var_name}" {{
                         fixed = True
                 except Exception as e:
                     print_error(f"Failed to add module reference: {str(e)}")
+        
+        elif action["type"] == "add_policy_module" or action["type"] == "add_access_policy_module":
+            # These are handled by the add_module_reference case above
+            pass
     
     return fixed
 

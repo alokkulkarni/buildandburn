@@ -4,7 +4,29 @@ This guide will help you get started with creating your first disposable develop
 
 ## Prerequisites
 
-Before you begin, make sure you have installed the Build and Burn CLI tool and configured your AWS credentials. See the [Installation Guide](../INSTALL.md) for details.
+Before you begin, ensure you have the following installed:
+
+1. **Python 3.7+**
+2. **AWS CLI**: Configured with appropriate credentials
+3. **Terraform**: Version 1.0.0 or later
+4. **kubectl**: For interacting with Kubernetes clusters
+5. **Helm**: For deploying applications to Kubernetes
+
+## Installation
+
+Install the Build and Burn CLI using pip:
+
+```bash
+pip install buildandburn
+```
+
+Or install from source:
+
+```bash
+git clone https://github.com/yourusername/buildandburn.git
+cd buildandburn/cli
+pip install -e .
+```
 
 ## Creating Your First Environment
 
@@ -40,17 +62,27 @@ This manifest defines a simple application with an Nginx backend service and a P
 Run the following command to create your environment:
 
 ```bash
-buildandburn up my-app.yaml
+buildandburn up --manifest my-app.yaml
 ```
 
-The tool will provision the necessary AWS infrastructure, create a Kubernetes cluster, and deploy your services.
+The tool will:
+1. Provision the necessary AWS infrastructure
+2. Create a Kubernetes cluster
+3. Deploy your services
+4. Display access information when complete
+
+For a dry run that validates your configuration without creating resources:
+
+```bash
+buildandburn up --manifest my-app.yaml --dry-run
+```
 
 ### 3. Access Your Environment
 
 Once the environment is created, the CLI will display access information for your services. You can also get this information at any time using:
 
 ```bash
-buildandburn info <env_id>
+buildandburn info --env-id <env_id>
 ```
 
 Replace `<env_id>` with the ID that was generated when you created the environment.
@@ -68,14 +100,49 @@ buildandburn list
 When you're done with the environment, you can destroy it to free up resources:
 
 ```bash
-buildandburn down <env_id>
+buildandburn down --env-id <env_id>
 ```
 
 This will destroy all the infrastructure created for the environment.
 
-## Using Custom Manifests
+## Using Custom Kubernetes Resources
 
-You can customize your environment by modifying the manifest file. Here are some examples:
+You can provide your own Kubernetes resources instead of having Build and Burn generate them automatically.
+
+### 1. Create Custom Kubernetes Resources
+
+Create a directory for your Kubernetes resources:
+
+```bash
+mkdir -p custom-k8s/my-app/templates
+```
+
+Add your Kubernetes manifests or Helm chart files to this directory.
+
+### 2. Reference the Custom Resources in Your Manifest
+
+Update your manifest file to reference the custom resources:
+
+```yaml
+name: my-app-custom
+region: eu-west-2
+k8s_path: './custom-k8s/my-app'  # Path to your custom K8s resources
+
+services:
+  - name: backend
+    image: nginx:alpine
+    port: 80
+```
+
+### 3. Create the Environment with Custom Resources
+
+Use the `--no-generate-k8s` flag to tell Build and Burn to use your custom resources:
+
+```bash
+buildandburn up --manifest my-app-custom.yaml --no-generate-k8s
+```
+
+## Advanced Manifest Examples
 
 ### Multiple Services
 
@@ -133,8 +200,13 @@ services:
               path: application.properties
 ```
 
+## GitHub Actions Integration
+
+You can also use Build and Burn with GitHub Actions. See [GitHub Actions Integration](./auto-deploy.md) for details.
+
 ## Next Steps
 
 - See the [Manifest Reference](./manifest-reference.md) for detailed information about the manifest file format.
 - Check out the [CLI Reference](./cli-reference.md) for more information about the CLI commands.
-- Learn how to [integrate with your IDE](./ide-integration.md). 
+- Learn how to [integrate with your IDE](./ide-plugins/README.md).
+- Explore [Backstage integration](./backstage/README.md) for portal-based environment management. 

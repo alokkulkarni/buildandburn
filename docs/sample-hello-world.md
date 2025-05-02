@@ -4,11 +4,11 @@ This document explains how to deploy a simple Hello World application using the 
 
 ## Sample Manifest
 
-The sample manifest (`cli/sample-manifest.yaml`) defines:
+The sample manifest defines:
 
 1. A Spring Boot backend container that serves a simple "Hello World" response
 2. An Nginx frontend that proxies requests to the backend
-3. Infrastructure dependencies (PostgreSQL database and RabbitMQ message queue)
+3. Optional infrastructure dependencies (PostgreSQL database and RabbitMQ message queue)
 
 ```yaml
 name: hello-world
@@ -21,12 +21,16 @@ services:
     port: 8080
     replicas: 1
     expose: true
+    service:
+      type: LoadBalancer  # Make the service externally accessible
   
   - name: nginx-frontend
     image: nginx:alpine
     port: 80
     replicas: 1
     expose: true
+    service:
+      type: LoadBalancer  # Make the service externally accessible
     configMapData:
       nginx.conf: |
         server {
@@ -54,7 +58,7 @@ services:
             - key: nginx.conf
               path: nginx.conf
 
-# Infrastructure dependencies
+# Optional infrastructure dependencies
 dependencies:
   - type: database
     provider: postgres
@@ -72,7 +76,7 @@ dependencies:
 
 1. The Spring Boot backend container runs a simple web service that returns "Hello World" when accessed
 2. The Nginx frontend container is configured to proxy all requests to the backend service
-3. Both services are exposed via Kubernetes ingress, making them accessible from outside the cluster
+3. Both services are exposed via LoadBalancer services, making them directly accessible from outside the cluster
 4. The Nginx configuration is provided as a ConfigMap and mounted into the container
 
 ## Deployment
@@ -80,7 +84,7 @@ dependencies:
 To deploy this sample, run:
 
 ```bash
-./cli/deploy_env.py cli/sample-manifest.yaml
+buildandburn up --manifest sample-manifest.yaml
 ```
 
 This will:
@@ -90,12 +94,18 @@ This will:
 
 ## Testing the Deployment
 
-Once deployed, you can access:
+Once deployed, the CLI will output access information for your services. You can access:
 
-1. The frontend service at: `http://nginx-frontend.hello-world.<cluster-domain>/`
-2. The backend service directly at: `http://springboot-backend.hello-world.<cluster-domain>/`
+1. The frontend service at the provided LoadBalancer URL/IP
+2. The backend service directly at its LoadBalancer URL/IP
 
 Both should display "Hello World" when accessed, but the frontend request will be proxied through Nginx to the Spring Boot backend.
+
+You can retrieve these URLs at any time using:
+
+```bash
+buildandburn info --env-id <env-id>
+```
 
 ## Customization
 
@@ -111,11 +121,7 @@ You can modify this sample by:
 To destroy the environment when you're done:
 
 ```bash
-./cli/deploy_env.py --down cli/sample-manifest.yaml
+buildandburn down --env-id <env-id>
 ```
 
-Or using the main CLI:
-
-```bash
-buildandburn down --env <env-id>
-``` 
+This will destroy all resources created by the deployment, including the Kubernetes cluster, networking components, and any infrastructure dependencies. 

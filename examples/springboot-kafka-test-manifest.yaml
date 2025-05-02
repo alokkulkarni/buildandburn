@@ -1,0 +1,82 @@
+name: springboot-kafka-app
+version: 1.0.0
+region: us-west-2
+description: "A Spring Boot Hello World application that uses Kafka"
+
+# Infrastructure dependencies
+dependencies:
+  - type: kafka
+    provider: aws-msk
+    version: "2.8.1"
+    instance_class: kafka.t3.small
+    broker_count: 2
+    volume_size: 20
+
+# Services to deploy
+services:
+  - name: springboot-kafka-producer
+    image: springio/hello-world-kafka-producer:latest
+    port: 8080
+    replicas: 1
+    expose: true
+    service:
+      type: ClusterIP
+    env:
+      - name: KAFKA_BOOTSTRAP_SERVERS
+        value: ${kafka.bootstrap_brokers}
+      - name: KAFKA_TOPIC
+        value: hello-world-topic
+      - name: SPRING_PROFILES_ACTIVE
+        value: production
+    healthcheck:
+      readiness:
+        path: /actuator/health
+        port: 8080
+        initialDelay: 30
+        period: 10
+      liveness:
+        path: /actuator/health
+        port: 8080
+        initialDelay: 40
+        period: 20
+
+  - name: springboot-kafka-consumer
+    image: springio/hello-world-kafka-consumer:latest
+    port: 8081
+    replicas: 2
+    expose: true
+    service:
+      type: ClusterIP
+    env:
+      - name: KAFKA_BOOTSTRAP_SERVERS
+        value: ${kafka.bootstrap_brokers}
+      - name: KAFKA_TOPIC
+        value: hello-world-topic
+      - name: KAFKA_GROUP_ID
+        value: hello-world-group
+      - name: SPRING_PROFILES_ACTIVE
+        value: production
+    healthcheck:
+      readiness:
+        path: /actuator/health
+        port: 8081
+        initialDelay: 30
+        period: 10
+      liveness:
+        path: /actuator/health
+        port: 8081
+        initialDelay: 40
+        period: 20
+
+  - name: webapp
+    image: nginx:alpine
+    port: 80
+    replicas: 1
+    expose: true
+    service:
+      type: LoadBalancer
+    env:
+      - name: PRODUCER_URL
+        value: http://springboot-kafka-producer:8080
+      - name: CONSUMER_URL
+        value: http://springboot-kafka-consumer:8081

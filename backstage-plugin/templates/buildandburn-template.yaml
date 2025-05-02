@@ -1,0 +1,264 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: buildandburn-template
+  title: Build and Burn Environment
+  description: Create disposable Kubernetes environments for testing and development
+  tags:
+    - kubernetes
+    - aws
+    - preview
+    - environment
+    - testing
+  annotations:
+    github.com/project-slug: ${{ parameters.githubOrg }}/${{ parameters.repoName }}
+spec:
+  owner: user:guest
+  type: service
+  parameters:
+    - title: Provide Repository Information
+      required:
+        - githubOrg
+        - repoName
+      properties:
+        githubOrg:
+          title: GitHub Organization
+          type: string
+          ui:field: EntityPicker
+          ui:options:
+            catalogFilter:
+              kind: Group
+        repoName:
+          title: Repository Name
+          type: string
+          description: Name of the GitHub repository where the manifest will be stored
+    
+    - title: Environment Configuration
+      required:
+        - name
+        - region
+      properties:
+        name:
+          title: Environment Name
+          type: string
+          description: Name for your environment (used in resource naming)
+        region:
+          title: AWS Region
+          type: string
+          description: AWS region to deploy to
+          default: eu-west-2
+          enum:
+            - eu-west-1
+            - eu-west-2
+            - us-east-1
+            - us-east-2
+            - us-west-1
+            - us-west-2
+          enumNames:
+            - EU (Ireland)
+            - EU (London)
+            - US East (N. Virginia)
+            - US East (Ohio)
+            - US West (N. California)
+            - US West (Oregon)
+    
+    - title: Service Configuration
+      required:
+        - services
+      properties:
+        services:
+          title: Services
+          type: array
+          description: Services to deploy in the environment
+          items:
+            type: object
+            required:
+              - name
+              - image
+              - port
+            properties:
+              name:
+                title: Service Name
+                type: string
+                description: Name of the service (used in Kubernetes resource naming)
+              image:
+                title: Container Image
+                type: string
+                description: Docker image to use for this service
+              port:
+                title: Port
+                type: number
+                description: Port the service listens on
+              replicas:
+                title: Replicas
+                type: number
+                description: Number of replicas to deploy
+                default: 1
+              expose:
+                title: Expose Service
+                type: boolean
+                description: Whether to expose the service externally
+                default: true
+              serviceType:
+                title: Service Type
+                type: string
+                description: Kubernetes service type
+                default: LoadBalancer
+                enum:
+                  - ClusterIP
+                  - LoadBalancer
+                  - NodePort
+    
+    - title: Infrastructure Dependencies (Optional)
+      properties:
+        dependencies:
+          title: Dependencies
+          type: array
+          description: Infrastructure dependencies for your environment
+          items:
+            type: object
+            required:
+              - type
+              - provider
+            properties:
+              type:
+                title: Dependency Type
+                type: string
+                enum:
+                  - database
+                  - queue
+                  - cache
+                  - storage
+              provider:
+                title: Provider
+                type: string
+                description: Provider to use for this dependency
+                enum:
+                  - postgres
+                  - mysql
+                  - rabbitmq
+                  - redis
+                  - s3
+              version:
+                title: Version
+                type: string
+                description: Version of the dependency
+              storage:
+                title: Storage (GB)
+                type: number
+                description: Storage size in GB for database or storage dependencies
+                default: 20
+              instanceClass:
+                title: Instance Class
+                type: string
+                description: AWS instance class for the dependency
+                default: db.t3.small
+    
+    - title: Kubernetes Configuration (Optional)
+      properties:
+        customK8sPath:
+          title: Custom Kubernetes Resources Path
+          type: string
+          description: Path to custom Kubernetes resources (leave empty to generate automatically)
+        skipK8sGeneration:
+          title: Skip K8s Generation
+          type: boolean
+          description: Skip Kubernetes resource generation (use with customK8sPath)
+          default: false
+        dryRun:
+          title: Dry Run
+          type: boolean
+          description: Validate configuration without creating resources
+          default: false
+    
+    - title: CI/CD Configuration
+      required:
+        - setupGithubAction
+      properties:
+        setupGithubAction:
+          title: Setup GitHub Action
+          type: boolean
+          description: Create GitHub Actions workflow to manage environments
+          default: true
+
+  steps:
+    - id: generateManifest
+      name: Generate Build and Burn Manifest
+      action: jinja:render
+      input:
+        path: ./manifests/template.yaml
+        values:
+          name: ${{ parameters.name }}
+          region: ${{ parameters.region }}
+          services: ${{ parameters.services }}
+          dependencies: ${{ parameters.dependencies }}
+          customK8sPath: ${{ parameters.customK8sPath }}
+
+    - id: createRepository
+      name: Create GitHub Repository
+      action: github:createRepository
+      if: ${{ true }}
+      input:
+        repoUrl: github.com?repo=${{ parameters.repoName }}&owner=${{ parameters.githubOrg }}
+        description: Repository for Build and Burn environment manifests
+        defaultBranch: main
+        visibility: private
+        deleteBranchOnMerge: true
+        protectDefaultBranch: false
+
+    - id: publishManifest
+      name: Publish Manifest
+      action: github:publishFile
+      input:
+        repoUrl: github.com?repo=${{ parameters.repoName }}&owner=${{ parameters.githubOrg }}
+        commitMessage: Add Build and Burn manifest
+        branch: main
+        sourcePath: ./manifests/template.yaml
+        targetPath: manifest.yaml
+
+    - id: setupGithubAction
+      name: Setup GitHub Action Workflow
+      action: github:publishFile
+      if: ${{ parameters.setupGithubAction }}
+      input:
+        repoUrl: github.com?repo=${{ parameters.repoName }}&owner=${{ parameters.githubOrg }}
+        commitMessage: Setup Build and Burn GitHub Actions workflow
+        branch: main
+        sourcePath: ./workflows/buildandburn.yml
+        targetPath: .github/workflows/buildandburn.yml
+
+    - id: createReadme
+      name: Create README
+      action: github:publishFile
+      input:
+        repoUrl: github.com?repo=${{ parameters.repoName }}&owner=${{ parameters.githubOrg }}
+        commitMessage: Add README for Build and Burn environment
+        branch: main
+        sourcePath: ./README.md
+        targetPath: README.md
+
+    - id: createSecrets
+      name: Configure GitHub Secrets
+      action: github:setupRepoSecrets
+      if: ${{ parameters.setupGithubAction }}
+      input:
+        repoUrl: github.com?repo=${{ parameters.repoName }}&owner=${{ parameters.githubOrg }}
+        secrets:
+          AWS_REGION: ${{ parameters.region }}
+        message: |
+          You need to manually add the following GitHub secrets to your repository:
+          
+          - AWS_ACCESS_KEY_ID
+          - AWS_SECRET_ACCESS_KEY
+          
+          These credentials should have permissions to create AWS resources.
+
+  output:
+    links:
+      - title: Repository
+        url: github.com/${{ parameters.githubOrg }}/${{ parameters.repoName }}
+      - title: GitHub Actions Workflow
+        if: ${{ parameters.setupGithubAction }}
+        url: github.com/${{ parameters.githubOrg }}/${{ parameters.repoName }}/actions
+      - title: Manifest
+        url: github.com/${{ parameters.githubOrg }}/${{ parameters.repoName }}/blob/main/manifest.yaml 

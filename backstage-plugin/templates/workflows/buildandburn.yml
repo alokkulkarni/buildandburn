@@ -1,0 +1,126 @@
+name: Build and Burn Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'up'
+        type: choice
+        options:
+          - up
+          - down
+          - info
+          - list
+      manifest_path:
+        description: 'Path to manifest file'
+        required: false
+        default: 'manifest.yaml'
+        type: string
+      env_id:
+        description: 'Environment ID (required for down/info actions)'
+        required: false
+        type: string
+      no_generate_k8s:
+        description: 'Skip K8s resource generation (use k8s_path from manifest)'
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: 'Validate configuration without creating resources'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_REGION: ${{ secrets.AWS_REGION || 'eu-west-2' }}
+
+jobs:
+  buildandburn:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install buildandburn
+          pip install awscli kubernetes-helm
+          
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.3.7
+          
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.25.9'
+          
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.11.2'
+          
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: List environments
+        if: ${{ github.event.inputs.action == 'list' }}
+        run: |
+          buildandburn list
+          
+      - name: Create environment
+        if: ${{ github.event.inputs.action == 'up' }}
+        run: |
+          # Set flags based on inputs
+          EXTRA_FLAGS=""
+          if [ "${{ github.event.inputs.no_generate_k8s }}" == "true" ]; then
+            EXTRA_FLAGS="$EXTRA_FLAGS --no-generate-k8s"
+          fi
+          
+          if [ "${{ github.event.inputs.dry_run }}" == "true" ]; then
+            EXTRA_FLAGS="$EXTRA_FLAGS --dry-run"
+          fi
+          
+          # Run the command with all flags
+          buildandburn up --manifest ${{ github.event.inputs.manifest_path }} $EXTRA_FLAGS
+        
+      - name: Destroy environment
+        if: ${{ github.event.inputs.action == 'down' }}
+        run: |
+          if [ -z "${{ github.event.inputs.env_id }}" ]; then
+            echo "::error::env_id is required for down action"
+            exit 1
+          fi
+          buildandburn down --env-id ${{ github.event.inputs.env_id }} --force
+          
+      - name: Get environment info
+        if: ${{ github.event.inputs.action == 'info' }}
+        run: |
+          if [ -z "${{ github.event.inputs.env_id }}" ]; then
+            echo "::error::env_id is required for info action"
+            exit 1
+          fi
+          buildandburn info --env-id ${{ github.event.inputs.env_id }}
+          
+      - name: Upload logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v3
+        with:
+          name: buildandburn-logs
+          path: ~/.buildandburn/*/
+          retention-days: 7 

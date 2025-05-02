@@ -1,0 +1,29 @@
+name: {{ name }}
+region: {{ region }}
+{% if customK8sPath %}
+k8s_path: '{{ customK8sPath }}'
+{% endif %}
+
+# Services to deploy
+services:
+{% for service in services %}
+  - name: {{ service.name }}
+    image: {{ service.image }}
+    port: {{ service.port }}
+    replicas: {{ service.replicas }}
+    expose: {{ service.expose }}
+    service:
+      type: {{ service.serviceType }}
+{% endfor %}
+
+{% if dependencies and dependencies|length > 0 %}
+# Infrastructure dependencies
+dependencies:
+{% for dependency in dependencies %}
+  - type: {{ dependency.type }}
+    provider: {{ dependency.provider }}
+    {% if dependency.version %}version: "{{ dependency.version }}"{% endif %}
+    {% if dependency.storage %}storage: {{ dependency.storage }}{% endif %}
+    {% if dependency.instanceClass %}instance_class: {{ dependency.instanceClass }}{% endif %}
+{% endfor %}
+{% endif %} 

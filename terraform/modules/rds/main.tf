@@ -1,5 +1,6 @@
 locals {
-  db_name     = "${var.project_name}${var.env_id}"
+  # Ensure db_name only contains alphanumeric characters and starts with a letter
+  db_name     = replace("db${var.project_name}${var.env_id}", "/[^a-zA-Z0-9]/", "")
   db_username = "bbadmin"
   db_password = random_password.db_password.result
 }

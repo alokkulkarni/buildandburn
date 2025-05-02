@@ -32,7 +32,7 @@ variable "engine_type" {
 variable "engine_version" {
   description = "Message broker engine version"
   type        = string
-  default     = "3.9.16"
+  default     = "3.13"
 }
 
 variable "instance_type" {

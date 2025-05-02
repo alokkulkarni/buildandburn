@@ -823,6 +823,15 @@ def generate_resource_summary(manifest, tf_vars, terraform_project_dir):
 
 def provision_infrastructure(manifest, env_id, terraform_dir, args=None):
     """Provision infrastructure using Terraform based on the manifest."""
+    
+    if manifest is None:
+        print_error("Manifest is empty or invalid. Please provide a valid manifest file.")
+        return None, {}
+    
+    if 'name' not in manifest:
+        print_error("Manifest must contain a 'name' field. Please provide a valid manifest file.")
+        return None, {}
+    
     # Default auto_approve
     if args is None:
         class DefaultArgs:
@@ -1011,15 +1020,53 @@ terraform {{
                     print_info("AWS provider already defined in main.tf")
                     providers_already_defined = True
         
+        # Also check provider-aws.tf if it exists
+        provider_aws_path = os.path.join(terraform_project_dir, "provider-aws.tf")
+        if os.path.exists(provider_aws_path):
+            with open(provider_aws_path, 'r') as f:
+                provider_aws_content = f.read()
+                if 'provider "aws"' in provider_aws_content:
+                    print_info("AWS provider already defined in provider-aws.tf")
+                    providers_already_defined = True
+        
+        # Check all .tf files for provider declarations
+        tf_files = glob.glob(os.path.join(terraform_project_dir, "*.tf"))
+        for tf_file in tf_files:
+            if tf_file != os.path.join(terraform_project_dir, "providers.tf"):
+                try:
+                    with open(tf_file, 'r') as f:
+                        content = f.read()
+                        if 'provider "aws"' in content:
+                            file_name = os.path.basename(tf_file)
+                            print_info(f"AWS provider already defined in {file_name}")
+                            providers_already_defined = True
+                            break
+                except Exception as e:
+                    print_warning(f"Could not read {tf_file}: {str(e)}")
+        
+        # Also check for required_providers declaration
+        required_providers_defined = False
+        for tf_file in tf_files:
+            try:
+                with open(tf_file, 'r') as f:
+                    content = f.read()
+                    if 'required_providers' in content:
+                        file_name = os.path.basename(tf_file)
+                        print_info(f"required_providers already defined in {file_name}")
+                        required_providers_defined = True
+                        break
+            except Exception as e:
+                print_warning(f"Could not read {tf_file}: {str(e)}")
+        
         # Remove providers.tf if it exists to avoid duplicate providers
         providers_file = os.path.join(terraform_project_dir, "providers.tf")
         if os.path.exists(providers_file):
             print_info("Removing existing providers.tf to avoid duplicates")
             os.remove(providers_file)
         
-        # Only create providers.tf if providers aren't already defined
-        if not providers_already_defined:
-            print_info("Creating providers.tf file...")
+        # Only create providers.tf if providers and required_providers aren't already defined
+        if not providers_already_defined and not required_providers_defined:
+            print_info("Creating providers.tf file with provider and required_providers...")
             with open(providers_file, 'w') as f:
                 f.write(f"""
 provider "aws" {{
@@ -1044,6 +1091,38 @@ terraform {{
   }}
 }}
 """)
+        elif not providers_already_defined and required_providers_defined:
+            print_info("Creating providers.tf file with only provider configuration...")
+            with open(providers_file, 'w') as f:
+                f.write(f"""
+provider "aws" {{
+  region = "{region}"
+}}
+""")
+        elif providers_already_defined and not required_providers_defined:
+            print_info("Creating providers.tf file with only required_providers configuration...")
+            with open(providers_file, 'w') as f:
+                f.write(f"""
+terraform {{
+  required_version = ">= 1.0.0"
+  required_providers {{
+    aws = {{
+      source  = "hashicorp/aws"
+      version = "~> 4.0"
+    }}
+    kubernetes = {{
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.10"
+    }}
+    helm = {{
+      source  = "hashicorp/helm"
+      version = "~> 2.5"
+    }}
+  }}
+}}
+""")
+        else:
+            print_info("Skipping providers.tf creation as both provider and required_providers already exist")
         
         # Remove any existing Terraform state
         print_info("Removing any existing Terraform state...")
@@ -1139,15 +1218,53 @@ terraform {{
                     print_info("AWS provider already defined in main.tf")
                     providers_already_defined = True
         
+        # Also check provider-aws.tf if it exists
+        provider_aws_path = os.path.join(terraform_project_dir, "provider-aws.tf")
+        if os.path.exists(provider_aws_path):
+            with open(provider_aws_path, 'r') as f:
+                provider_aws_content = f.read()
+                if 'provider "aws"' in provider_aws_content:
+                    print_info("AWS provider already defined in provider-aws.tf")
+                    providers_already_defined = True
+        
+        # Check all .tf files for provider declarations
+        tf_files = glob.glob(os.path.join(terraform_project_dir, "*.tf"))
+        for tf_file in tf_files:
+            if tf_file != os.path.join(terraform_project_dir, "providers.tf"):
+                try:
+                    with open(tf_file, 'r') as f:
+                        content = f.read()
+                        if 'provider "aws"' in content:
+                            file_name = os.path.basename(tf_file)
+                            print_info(f"AWS provider already defined in {file_name}")
+                            providers_already_defined = True
+                            break
+                except Exception as e:
+                    print_warning(f"Could not read {tf_file}: {str(e)}")
+        
+        # Also check for required_providers declaration
+        required_providers_defined = False
+        for tf_file in tf_files:
+            try:
+                with open(tf_file, 'r') as f:
+                    content = f.read()
+                    if 'required_providers' in content:
+                        file_name = os.path.basename(tf_file)
+                        print_info(f"required_providers already defined in {file_name}")
+                        required_providers_defined = True
+                        break
+            except Exception as e:
+                print_warning(f"Could not read {tf_file}: {str(e)}")
+        
         # Remove providers.tf if it exists to avoid duplicate providers
         providers_file = os.path.join(terraform_project_dir, "providers.tf")
         if os.path.exists(providers_file):
             print_info("Removing existing providers.tf to avoid duplicates")
             os.remove(providers_file)
         
-        # Only create providers.tf if providers aren't already defined
-        if not providers_already_defined:
-            print_info("Creating providers.tf file...")
+        # Only create providers.tf if providers and required_providers aren't already defined
+        if not providers_already_defined and not required_providers_defined:
+            print_info("Creating providers.tf file with provider and required_providers...")
             with open(providers_file, 'w') as f:
                 f.write(f"""
 provider "aws" {{
@@ -1172,6 +1289,38 @@ terraform {{
   }}
 }}
 """)
+        elif not providers_already_defined and required_providers_defined:
+            print_info("Creating providers.tf file with only provider configuration...")
+            with open(providers_file, 'w') as f:
+                f.write(f"""
+provider "aws" {{
+  region = "{region}"
+}}
+""")
+        elif providers_already_defined and not required_providers_defined:
+            print_info("Creating providers.tf file with only required_providers configuration...")
+            with open(providers_file, 'w') as f:
+                f.write(f"""
+terraform {{
+  required_version = ">= 1.0.0"
+  required_providers {{
+    aws = {{
+      source  = "hashicorp/aws"
+      version = "~> 4.0"
+    }}
+    kubernetes = {{
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.10"
+    }}
+    helm = {{
+      source  = "hashicorp/helm"
+      version = "~> 2.5"
+    }}
+  }}
+}}
+""")
+        else:
+            print_info("Skipping providers.tf creation as both provider and required_providers already exist")
         
         # Remove any existing Terraform state
         print_info("Removing any existing Terraform state...")
@@ -3480,6 +3629,27 @@ def fix_terraform_issues(terraform_dir, error_analysis, tf_vars_file=None, regio
 def add_provider_config(terraform_dir, region=None):
     """Add a proper AWS provider configuration to the Terraform files."""
     try:
+        # Check for existing provider configurations in any Terraform file
+        provider_already_defined = False
+        tf_files = glob.glob(os.path.join(terraform_dir, "*.tf"))
+        
+        for tf_file in tf_files:
+            try:
+                with open(tf_file, 'r') as f:
+                    content = f.read()
+                    if 'provider "aws"' in content:
+                        file_name = os.path.basename(tf_file)
+                        print_info(f"AWS provider already defined in {file_name}")
+                        provider_already_defined = True
+                        break
+            except Exception as e:
+                print_warning(f"Could not read {tf_file}: {str(e)}")
+        
+        # If provider is already defined, don't add another one
+        if provider_already_defined:
+            print_info("AWS provider already defined in an existing file. Skipping.")
+            return False
+            
         # Check if providers.tf already exists
         providers_file = os.path.join(terraform_dir, "providers.tf")
         
@@ -3594,40 +3764,124 @@ def fix_duplicate_provider_blocks(terraform_dir):
     """Fix duplicate provider blocks in Terraform files."""
     try:
         # Find all provider blocks in all Terraform files
-        provider_files = {}
+        provider_files = []
         tf_files = glob.glob(os.path.join(terraform_dir, "*.tf"))
         
+        # First, check if provider-aws.tf exists
+        provider_aws_path = os.path.join(terraform_dir, "provider-aws.tf")
+        provider_aws_exists = os.path.exists(provider_aws_path)
+        
+        # If provider-aws.tf exists, we'll keep that one and remove others
+        primary_provider_file = "provider-aws.tf" if provider_aws_exists else None
+        
+        # Find all files with AWS provider blocks
         for tf_file in tf_files:
+            file_name = os.path.basename(tf_file)
             with open(tf_file, 'r') as f:
                 content = f.read()
             
             # Check for provider blocks
             if 'provider "aws"' in content:
-                if "providers.tf" not in provider_files:
-                    provider_files["providers.tf"] = []
-                provider_files["providers.tf"].append(tf_file)
+                provider_files.append(file_name)
         
         # If we have duplicate provider blocks, fix them
-        if "providers.tf" in provider_files and len(provider_files["providers.tf"]) > 1:
-            print_warning(f"Found duplicate AWS provider blocks in {len(provider_files['providers.tf'])} files")
+        if len(provider_files) > 1:
+            print_warning(f"Found duplicate AWS provider blocks in: {', '.join(provider_files)}")
             
-            # Keep provider block only in providers.tf
-            for tf_file in provider_files["providers.tf"]:
-                if os.path.basename(tf_file) != "providers.tf":
-                    with open(tf_file, 'r') as f:
+            # If we don't have a primary provider file yet, use the first one that's not providers.tf
+            if primary_provider_file is None:
+                for file_name in provider_files:
+                    if file_name != "providers.tf":
+                        primary_provider_file = file_name
+                        break
+                
+                # If we still don't have a primary file, use providers.tf if it exists
+                if primary_provider_file is None and "providers.tf" in provider_files:
+                    primary_provider_file = "providers.tf"
+                # Otherwise, just use the first file
+                elif primary_provider_file is None and provider_files:
+                    primary_provider_file = provider_files[0]
+            
+            print_info(f"Keeping AWS provider in {primary_provider_file} and removing from others")
+            
+            # Remove provider blocks from all other files
+            for file_name in provider_files:
+                if file_name != primary_provider_file:
+                    file_path = os.path.join(terraform_dir, file_name)
+                    with open(file_path, 'r') as f:
                         content = f.read()
                     
                     # Extract the provider block and remove it
                     provider_pattern = r'provider\s+"aws"\s+\{[^}]*\}'
                     new_content = re.sub(provider_pattern, '', content)
                     
-                    with open(tf_file, 'w') as f:
+                    # Clean up extra empty lines
+                    new_content = re.sub(r'\n\s*\n\s*\n', '\n\n', new_content)
+                    
+                    with open(file_path, 'w') as f:
                         f.write(new_content)
             
-            print_success("Removed duplicate AWS provider blocks")
+            print_success(f"Removed duplicate AWS provider blocks, keeping the one in {primary_provider_file}")
             return True
         
-        return False  # No duplicate provider blocks
+        # Also check for duplicate required_providers blocks
+        required_providers_files = []
+        for tf_file in tf_files:
+            file_name = os.path.basename(tf_file)
+            with open(tf_file, 'r') as f:
+                content = f.read()
+            
+            # Check for required_providers blocks
+            if 'required_providers' in content:
+                required_providers_files.append(file_name)
+        
+        # If we have duplicate required_providers blocks, fix them
+        if len(required_providers_files) > 1:
+            print_warning(f"Found duplicate required_providers blocks in: {', '.join(required_providers_files)}")
+            
+            # Prefer to keep the one in main.tf if it exists
+            primary_required_file = "main.tf" if "main.tf" in required_providers_files else required_providers_files[0]
+            print_info(f"Keeping required_providers in {primary_required_file} and removing from others")
+            
+            # Remove required_providers blocks from all other files
+            for file_name in required_providers_files:
+                if file_name != primary_required_file:
+                    file_path = os.path.join(terraform_dir, file_name)
+                    with open(file_path, 'r') as f:
+                        content = f.read()
+                    
+                    # This pattern matches the required_providers block within a terraform block
+                    req_pattern = r'required_providers\s+\{[^}]*\}'
+                    
+                    # First try to remove just the required_providers block within terraform
+                    content_modified = False
+                    terraform_blocks = re.findall(r'terraform\s+\{[^}]*\}', content, re.DOTALL)
+                    for terraform_block in terraform_blocks:
+                        if 'required_providers' in terraform_block:
+                            new_terraform_block = re.sub(req_pattern, '', terraform_block)
+                            # If the terraform block is now empty, remove it entirely
+                            if re.match(r'terraform\s+\{\s*\}', new_terraform_block):
+                                content = content.replace(terraform_block, '')
+                            else:
+                                content = content.replace(terraform_block, new_terraform_block)
+                            content_modified = True
+                    
+                    # If we couldn't modify with the above approach, try a more aggressive approach
+                    if not content_modified:
+                        # Try to remove the entire terraform block if it contains required_providers
+                        terraform_pattern = r'terraform\s+\{[^}]*required_providers[^}]*\}'
+                        content = re.sub(terraform_pattern, '', content, flags=re.DOTALL)
+                    
+                    # Clean up extra empty lines
+                    content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
+                    
+                    with open(file_path, 'w') as f:
+                        f.write(content)
+            
+            print_success(f"Removed duplicate required_providers blocks, keeping the one in {primary_required_file}")
+            return True
+        
+        return False  # No duplicate provider or required_providers blocks
     except Exception as e:
         print_error(f"Failed to fix duplicate provider blocks: {str(e)}")
         return False

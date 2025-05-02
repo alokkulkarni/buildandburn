@@ -1,0 +1,10 @@
+name: test-minimal-valid
+region: us-west-2
+
+# Services to deploy
+services:
+  - name: nginx
+    image: nginx:alpine
+    port: 80
+    replicas: 1
+    expose: true 

@@ -65,8 +65,6 @@ resource "aws_eks_cluster" "main" {
     endpoint_public_access  = true
   }
 
-  tags = var.tags
-
   depends_on = [
     aws_iam_role_policy_attachment.cluster_AmazonEKSClusterPolicy,
     aws_iam_role_policy_attachment.cluster_AmazonEKSVPCResourceController,

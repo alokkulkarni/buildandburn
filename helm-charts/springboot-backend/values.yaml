@@ -1,0 +1,60 @@
+replicaCount: 1
+
+image:
+  repository: dstar55/docker-hello-world-spring-boot
+  tag: latest
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+  hosts:
+    - host: springboot-backend.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+env:
+  - name: SPRING_PROFILES_ACTIVE
+    value: "prod"
+  # If database is configured, these will be set by the template
+  - name: SPRING_DATASOURCE_URL
+    value: "jdbc:postgresql://postgres:5432/hello-world"
+  # If RabbitMQ is configured, these will be set by the template
+  - name: SPRING_RABBITMQ_HOST
+    value: "rabbitmq"
+  - name: SPRING_RABBITMQ_PORT
+    value: "5672"
+
+livenessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 60
+  periodSeconds: 10
+  timeoutSeconds: 5
+  
+readinessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5 

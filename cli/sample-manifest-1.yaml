@@ -1,5 +1,6 @@
 name: hello-world
 region: eu-west-2
+k8s_path: "./helm-charts"
 
 # Services to deploy
 services:

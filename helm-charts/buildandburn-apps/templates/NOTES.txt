@@ -1,0 +1,18 @@
+Thank you for installing {{ .Chart.Name }}.
+
+Your applications:
+
+1. Spring Boot Backend:
+   - Internal URL: http://{{ .Release.Name }}-sb:8080
+   {{- if .Values.sb.ingress.enabled }}
+   - External URL: http://{{ index .Values.sb.ingress.hosts 0 "host" }}
+   {{- end }}
+
+2. Nginx Frontend:
+   - Internal URL: http://{{ .Release.Name }}-nf:80
+   {{- if .Values.nf.ingress.enabled }}
+   - External URL: http://{{ index .Values.nf.ingress.hosts 0 "host" }}
+   {{- end }}
+
+For more information on accessing your application, run:
+  kubectl get svc,ingress -n {{ .Release.Namespace }} 

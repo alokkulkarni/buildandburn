@@ -1,0 +1,19 @@
+apiVersion: v2
+name: buildandburn-apps
+description: A Helm chart for deploying all buildandburn applications
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+dependencies:
+  - name: springboot-backend
+    version: "0.1.0"
+    repository: "file://../springboot-backend"
+    alias: sb
+  - name: nginx-frontend
+    version: "0.1.0"
+    repository: "file://../nginx-frontend"
+    alias: nf
+annotations:
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://github.com/yourusername/buildandburn 

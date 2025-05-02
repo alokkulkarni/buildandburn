@@ -19,7 +19,7 @@ infrastructure:
   
   # Kubernetes cluster configuration
   kubernetes:
-    version: "1.25"
+    version: "1.32"
     node_type: "t3.medium"
     node_count: 2
   

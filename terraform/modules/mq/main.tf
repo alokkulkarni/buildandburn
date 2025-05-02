@@ -86,6 +86,13 @@ resource "aws_mq_broker" "main" {
     general = true
   }
 
+  # Add extended timeouts
+  timeouts {
+    create = "60m"
+    update = "60m"
+    delete = "60m"
+  }
+
   tags = merge(
     var.tags,
     {

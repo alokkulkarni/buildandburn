@@ -19,6 +19,8 @@ services:
     image: nginx:latest
     port: 80
     replicas: 2
+    service:
+      type: LoadBalancer
     env:
       - name: BACKEND_URL
         value: "http://backend:8080"
@@ -26,6 +28,8 @@ services:
     image: python:3.9
     port: 8080
     replicas: 2
+    service:
+      type: ClusterIP
     command: ["python", "-m", "http.server", "8080"]
     env:
       - name: DATABASE_HOST

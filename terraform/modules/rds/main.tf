@@ -92,6 +92,13 @@ resource "aws_db_instance" "main" {
   skip_final_snapshot     = true
   deletion_protection     = false
 
+  # Add extended timeouts
+  timeouts {
+    create = "60m"
+    update = "60m"
+    delete = "60m"
+  }
+
   tags = merge(
     var.tags,
     {

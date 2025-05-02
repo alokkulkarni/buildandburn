@@ -5,8 +5,15 @@ k8s_path: "./helm-charts"
 # Provider configuration
 provider_config:
   aws:
-    max_retries: 10
+    max_retries: 15
     retry_mode: "standard"
+    connect_timeout: 30
+    read_timeout: 60
+    assume_role_timeout: 120
+    http_proxy: ""
+    endpoint_cache_limit: 50
+    skip_metadata_api_check: false
+    ec2_metadata_service_endpoint_mode: "IPv4"
 
 # Services to deploy
 services:

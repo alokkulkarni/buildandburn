@@ -87,15 +87,16 @@ module "mq" {
   source = "./modules/mq"
   count  = contains(var.dependencies, "queue") ? 1 : 0
 
-  project_name          = local.project_name
-  env_id                = local.env_id
-  vpc_id                = module.vpc.vpc_id
-  subnet_ids            = module.vpc.private_subnet_ids
-  eks_security_group_id = module.eks.cluster_security_group_id
-  engine_type           = var.mq_engine_type
-  engine_version        = var.mq_engine_version
-  instance_type         = var.mq_instance_type
-  tags                  = local.tags
+  project_name               = local.project_name
+  env_id                     = local.env_id
+  vpc_id                     = module.vpc.vpc_id
+  subnet_ids                 = module.vpc.private_subnet_ids
+  eks_security_group_id      = module.eks.cluster_security_group_id
+  engine_type                = var.mq_engine_type
+  engine_version             = var.mq_engine_version
+  instance_type              = var.mq_instance_type
+  auto_minor_version_upgrade = var.mq_auto_minor_version_upgrade
+  tags                       = local.tags
 
   depends_on = [module.vpc]
 }

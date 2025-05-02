@@ -120,6 +120,7 @@ Each dependency in the `dependencies` array can have the following fields:
 | `version` | string | No | The version of the dependency. |
 | `storage` | integer | No | For databases, the allocated storage in GB. Default: `20`. |
 | `instance_class` | string | No | The instance class to use. Default for databases: `db.t3.small`. Default for queues: `mq.t3.micro`. |
+| `auto_minor_version_upgrade` | boolean | No | Whether to automatically upgrade to new minor versions. Default: `true`. |
 
 Example:
 
@@ -134,6 +135,7 @@ dependencies:
   - type: queue
     provider: rabbitmq
     version: "3.13"
+    auto_minor_version_upgrade: true
     instance_class: mq.t3.micro
 ```
 
@@ -206,5 +208,6 @@ dependencies:
   - type: queue
     provider: rabbitmq
     version: "3.13"
+    auto_minor_version_upgrade: true
     instance_class: mq.t3.micro
 ``` 

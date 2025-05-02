@@ -439,6 +439,7 @@ def prepare_terraform_vars(manifest, env_id, project_dir):
                 "mq_engine_type": mq_config.get('provider', 'RabbitMQ'),
                 "mq_engine_version": mq_config.get('version', '3.13'),
                 "mq_instance_type": mq_config.get('instance_class', 'mq.t3.micro'),
+                "mq_auto_minor_version_upgrade": mq_config.get('auto_minor_version_upgrade', True),
             })
         else:
             print_warning("Queue dependency specified but no configuration found. Using defaults.")
@@ -446,6 +447,7 @@ def prepare_terraform_vars(manifest, env_id, project_dir):
                 "mq_engine_type": "RabbitMQ",
                 "mq_engine_version": "3.13",
                 "mq_instance_type": "mq.t3.micro",
+                "mq_auto_minor_version_upgrade": True,
             })
     
     # Add Redis-specific variables if needed

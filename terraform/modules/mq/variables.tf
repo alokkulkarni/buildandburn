@@ -45,4 +45,10 @@ variable "tags" {
   description = "Tags to apply to all resources"
   type        = map(string)
   default     = {}
+}
+
+variable "auto_minor_version_upgrade" {
+  description = "Whether to automatically upgrade to new minor versions during the maintenance window"
+  type        = bool
+  default     = true
 } 

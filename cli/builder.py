@@ -110,6 +110,7 @@ def extract_terraform_vars(manifest, env_id):
                 "mq_engine_type": mq_config.get('provider', 'RabbitMQ'),
                 "mq_engine_version": mq_config.get('version', '3.13'),
                 "mq_instance_type": mq_config.get('instance_class', 'mq.t3.micro'),
+                "mq_auto_minor_version_upgrade": mq_config.get('auto_minor_version_upgrade', True),
             })
     
     return tf_vars

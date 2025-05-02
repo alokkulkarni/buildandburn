@@ -56,10 +56,11 @@ resource "aws_security_group" "mq" {
 
 # Amazon MQ broker
 resource "aws_mq_broker" "main" {
-  broker_name        = "${var.project_name}-${var.env_id}-mq"
-  engine_type        = var.engine_type
-  engine_version     = var.engine_version
-  host_instance_type = var.instance_type
+  broker_name                = "${var.project_name}-${var.env_id}-mq"
+  engine_type                = var.engine_type
+  engine_version             = var.engine_version
+  host_instance_type         = var.instance_type
+  auto_minor_version_upgrade = var.auto_minor_version_upgrade
 
   security_groups = [aws_security_group.mq.id]
   subnet_ids      = [var.subnet_ids[0]] # Single-instance broker uses only one subnet

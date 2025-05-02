@@ -11,6 +11,7 @@ dependencies:
   - type: queue
     provider: RabbitMQ
     version: "3.13"
+    auto_minor_version_upgrade: true
     instance_class: mq.t3.micro
 
 services:

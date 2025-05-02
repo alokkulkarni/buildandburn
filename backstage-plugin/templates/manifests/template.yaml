@@ -1,6 +1,9 @@
 # This is a template file using Jinja2 syntax - not valid YAML until rendered
 # yaml-language-server: $schema=ignore
 # yamllint disable
+# yamllint disable-line rule:directive-duplicated
+# yamllint disable-line rule:truthy
+# yamllint disable-line rule:document-start
 name: {{ name }}
 region: {{ region }}
 {% if customK8sPath %}
@@ -28,5 +31,6 @@ dependencies:
     {% if dependency.version %}version: "{{ dependency.version }}"{% endif %}
     {% if dependency.storage %}storage: {{ dependency.storage }}{% endif %}
     {% if dependency.instanceClass %}instance_class: {{ dependency.instanceClass }}{% endif %}
+    {% if dependency.type == 'queue' %}auto_minor_version_upgrade: true{% endif %}
 {% endfor %}
 {% endif %} 

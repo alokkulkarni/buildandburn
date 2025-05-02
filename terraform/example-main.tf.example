@@ -93,6 +93,7 @@ module "mq" {
   engine_type         = var.mq_engine_type
   engine_version      = var.mq_engine_version
   instance_type       = var.mq_instance_type
+  auto_minor_version_upgrade = var.mq_auto_minor_version_upgrade
   eks_security_group_id = module.eks.node_security_group_id
   tags                = local.tags
   

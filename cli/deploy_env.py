@@ -373,14 +373,16 @@ def main():
                 "db_allocated_storage": int(db_config.get('storage', 20)),
             })
         
-        # Add queue specific variables if needed
-        if any(dep['type'] == 'queue' for dep in manifest.get('dependencies', [])):
-            mq_config = next((dep for dep in manifest.get('dependencies', []) if dep['type'] == 'queue'), {})
-            tfvars.update({
-                "mq_engine_type": mq_config.get('provider', 'RabbitMQ'),
-                "mq_engine_version": mq_config.get('version', '3.13'),
-                "mq_instance_type": mq_config.get('instance_class', 'mq.t3.micro'),
-            })
+        # Add queue-specific variables if 'queue' is in dependencies
+        if 'queue' in tfvars['dependencies']:
+            mq_config = next((d for d in manifest['dependencies'] if d['type'] == 'queue'), None)
+            if mq_config:
+                tfvars.update({
+                    "mq_engine_type": mq_config.get('provider', 'RabbitMQ'),
+                    "mq_engine_version": mq_config.get('version', '3.13'),
+                    "mq_instance_type": mq_config.get('instance_class', 'mq.t3.micro'),
+                    "mq_auto_minor_version_upgrade": mq_config.get('auto_minor_version_upgrade', True),
+                })
         
         # Write tfvars file
         tfvars_file = os.path.join(working_dir, 'terraform.tfvars.json')

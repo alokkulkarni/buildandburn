@@ -92,6 +92,12 @@ variable "mq_instance_type" {
   default     = "mq.t3.micro"
 }
 
+variable "mq_auto_minor_version_upgrade" {
+  description = "Whether to automatically upgrade to new minor versions of the message broker during the maintenance window"
+  type        = bool
+  default     = true
+}
+
 # Kafka Configuration Variables
 variable "kafka_version" {
   description = "Kafka version"

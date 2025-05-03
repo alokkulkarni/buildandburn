@@ -171,6 +171,41 @@ def run_command(cmd, cwd=None, capture_output=False, allow_fail=False, env=None)
         else:
             raise Exception(f"Exception running command: {str(e)}")
 
+import subprocess
+import re
+import json
+
+# Constants
+TERRAFORM_MIN_VERSION = "1.0.0"
+KUBECTL_MIN_VERSION = "1.20.0"
+AWS_CLI_MIN_VERSION = "2.0.0"
+
+def print_color(text, color_code):
+    """
+    Print text with specified color code.
+    
+    Args:
+        text (str): The text to print
+        color_code (str): ANSI color code to use
+    """
+    print(f"\033[{color_code}m{text}\033[0m")
+
+def print_success(text):
+    """Print success message in green."""
+    print_color(f"✅ {text}", "92")
+
+def print_info(text):
+    """Print information message in blue."""
+    print_color(f"ℹ️ {text}", "94")
+
+def print_warning(text):
+    """Print warning message in yellow."""
+    print_color(f"⚠️ {text}", "93")
+
+def print_error(text):
+    """Print error message in red."""
+    print_color(f"❌ {text}", "91")
+
 def is_terraform_installed():
     """
     Check if Terraform is installed and meets the minimum version requirement.
@@ -262,7 +297,7 @@ def is_kubectl_installed():
         return True, version
     except Exception as e:
         print_error(f"Error checking kubectl installation: {str(e)}")
-        return False, None
+        return False, None 
 
 def is_aws_cli_installed():
     """
@@ -305,6 +340,46 @@ def is_aws_cli_installed():
 def check_prerequisites():
     """
     Check if all required prerequisites are installed.
+    
+    This function verifies that Terraform, kubectl, and AWS CLI are installed
+    and meet the minimum version requirements.
+    
+    Returns:
+        bool: True if all prerequisites are installed and meet requirements
+    """
+    print_info("=" * 79)
+    print_info("CHECKING PREREQUISITES")
+    print_info("=" * 79)
+    
+    # Check Terraform
+    tf_installed, tf_version = is_terraform_installed()
+    if tf_installed:
+        print_info(f"Terraform version {tf_version} found.")
+    else:
+        print_error(f"Terraform version {TERRAFORM_MIN_VERSION} or higher is required.")
+        print_error("Please install Terraform: https://learn.hashicorp.com/tutorials/terraform/install-cli")
+        return False
+    
+    # Check AWS CLI
+    aws_installed, aws_version = is_aws_cli_installed()
+    if aws_installed:
+        print_info(f"AWS CLI version {aws_version} found.")
+    else:
+        print_error(f"AWS CLI version {AWS_CLI_MIN_VERSION} or higher is required.")
+        print_error("Please install AWS CLI: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html")
+        return False
+    
+    # Check kubectl
+    kubectl_installed, kubectl_version = is_kubectl_installed()
+    if kubectl_installed:
+        print_info(f"kubectl version {kubectl_version} found.")
+    else:
+        print_error(f"kubectl version {KUBECTL_MIN_VERSION} or higher is required.")
+        print_error("Please install kubectl: https://kubernetes.io/docs/tasks/tools/")
+        return False
+    
+    print_info("All prerequisites are installed.")
+    return True     Check if all required prerequisites are installed.
     
     This function verifies that Terraform, kubectl, and AWS CLI are installed
     and meet the minimum version requirements.

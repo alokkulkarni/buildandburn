@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: docker-pull-test
+  namespace: bb-postgres-app
+spec:
+  containers:
+  - name: docker-cli
+    image: docker:latest
+    command:
+    - /bin/sh
+    - -c
+    - |
+      echo "===== Testing ECR Authentication ====="
+      apk add --no-cache aws-cli curl
+      echo "Getting ECR token..."
+      aws ecr get-login-password --region eu-west-2 | docker login --username AWS --password-stdin 395402194296.dkr.ecr.eu-west-2.amazonaws.com
+      echo "Pulling image..."
+      docker pull 395402194296.dkr.ecr.eu-west-2.amazonaws.com/postgres-app:latest
+      echo "Image details:"
+      docker inspect 395402194296.dkr.ecr.eu-west-2.amazonaws.com/postgres-app:latest
+      echo "Done testing."
+      sleep 3600
+    securityContext:
+      privileged: true
+  restartPolicy: Never 

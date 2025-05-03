@@ -271,4 +271,18 @@ module "k8s_ingress" {
   eks_node_group_id = module.eks.node_group_id
 
   depends_on = [module.eks]
+}
+
+# Always apply ECR policy to allow EKS nodes to access images from any ECR repository
+module "eks_to_ecr_policy" {
+  source = "./modules/eks-to-ecr-policy"
+
+  project_name   = local.project_name
+  env_id         = local.env_id
+  region         = var.region
+  account_id     = local.account_id
+  node_role_name = module.eks.node_role_name
+  tags           = local.tags
+
+  depends_on = [module.eks]
 } 

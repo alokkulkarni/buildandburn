@@ -205,7 +205,7 @@ def is_terraform_installed():
                 break
         
         return True, version
-    except Exception as e:
+        except Exception as e:
         print_error(f"Error checking Terraform installation: {str(e)}")
         return False, None
 
@@ -238,7 +238,7 @@ def is_kubectl_installed():
                 version_info = json.loads(result.stdout)
                 if 'clientVersion' in version_info:
                     version = version_info['clientVersion']['gitVersion'].lstrip('v')
-                else:
+        else:
                     version = version_info['kustomizeVersion'].lstrip('v')
             except json.JSONDecodeError:
                 # Fallback to regex if JSON parsing fails

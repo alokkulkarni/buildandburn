@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: check-ecr-repos
+  namespace: bb-postgres-app
+spec:
+  containers:
+  - name: aws-cli
+    image: amazon/aws-cli:latest
+    command:
+    - /bin/bash
+    - -c
+    - |
+      echo "===== Checking ECR Repositories ====="
+      aws ecr describe-repositories --region eu-west-2
+      echo ""
+      echo "===== Checking Images in postgres-app Repository ====="
+      aws ecr describe-images --repository-name postgres-app --region eu-west-2
+      echo ""
+      echo "===== Testing Docker Pull ====="
+      # Install Docker client
+      yum install -y docker
+      # Try auth token directly
+      TOKEN=$(aws ecr get-authorization-token --region eu-west-2 --output text --query 'authorizationData[].authorizationToken')
+      echo $TOKEN | base64 -d | cut -d: -f2 | docker login -u AWS --password-stdin 395402194296.dkr.ecr.eu-west-2.amazonaws.com
+      echo "Done testing."
+      sleep 3600
+  restartPolicy: Never 

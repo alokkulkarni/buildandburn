@@ -78,7 +78,7 @@ ingress:
         - path: /
           path_type: Prefix
           service: postgres-app
-          port: 80
+    port: 80
   tls:
     - hosts:
         - postgres-app.example.com

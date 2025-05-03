@@ -54,7 +54,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install buildandburn
-          pip install awscli kubernetes-helm
+          pip install awscli kubernetes-helm yq jq
           
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v2
@@ -77,11 +77,137 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+        if: ${{ github.event.inputs.action == 'up' }}
           
       - name: List environments
         if: ${{ github.event.inputs.action == 'list' }}
         run: |
           buildandburn list
+      
+      - name: Setup ECR authentication
+        if: ${{ github.event.inputs.action == 'up' }}
+        id: ecr-login
+        run: |
+          # Get AWS account ID
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
+          echo "aws_account_id=$AWS_ACCOUNT_ID" >> $GITHUB_OUTPUT
+          
+          # Set ECR registry
+          ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          echo "ecr_registry=$ECR_REGISTRY" >> $GITHUB_OUTPUT
+          
+          # Login to ECR
+          aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+          
+          # Function to authenticate to cross-account ECR
+          authenticate_cross_account_ecr() {
+            local account_id=$1
+            local region=$2
+            
+            # Only authenticate if it's a different account
+            if [ "$account_id" != "$AWS_ACCOUNT_ID" ]; then
+              echo "Cross-account ECR detected: $account_id in region $region"
+              
+              # Try to authenticate to the cross-account ECR
+              CROSS_ACCOUNT_ECR_REGISTRY="${account_id}.dkr.ecr.${region}.amazonaws.com"
+              aws ecr get-login-password --region ${region} | \
+                docker login --username AWS --password-stdin ${CROSS_ACCOUNT_ECR_REGISTRY} || \
+                echo "Warning: Failed to authenticate to cross-account ECR. Make sure proper permissions are set."
+            fi
+          }
+          
+          # Parse manifest to get ECR repositories from images
+          if [ -f "${{ github.event.inputs.manifest_path }}" ]; then
+            echo "Checking for ECR images in manifest..."
+            
+            # Find all image references in the manifest
+            IMAGE_REFS=$(yq -r '.services[].image // empty' ${{ github.event.inputs.manifest_path }})
+            
+            # Process each image reference
+            if [ -n "$IMAGE_REFS" ]; then
+              for IMAGE_REF in $IMAGE_REFS; do
+                # Check if it's an ECR URL
+                if [[ "$IMAGE_REF" == *.dkr.ecr.*.amazonaws.com/* ]]; then
+                  echo "Found ECR image reference: $IMAGE_REF"
+                  
+                  # Extract account ID and region from the ECR URL
+                  ECR_URL_PATTERN="([0-9]+)\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com"
+                  if [[ "$IMAGE_REF" =~ $ECR_URL_PATTERN ]]; then
+                    ECR_ACCOUNT_ID="${BASH_REMATCH[1]}"
+                    ECR_REGION="${BASH_REMATCH[2]}"
+                    authenticate_cross_account_ecr "$ECR_ACCOUNT_ID" "$ECR_REGION"
+                  fi
+                fi
+              done
+            fi
+            
+            # Check if there's a k8s_path in the manifest
+            K8S_PATH=$(yq -r '.k8s_path // empty' ${{ github.event.inputs.manifest_path }})
+            if [ -n "$K8S_PATH" ] && [ -d "$K8S_PATH" ]; then
+              echo "Checking for ECR images in Kubernetes manifests at: $K8S_PATH"
+              
+              # Find all image references in YAML files
+              K8S_IMAGE_REFS=$(grep -r "image:" "$K8S_PATH" | grep "dkr.ecr" | awk '{print $2}' | tr -d '"' | tr -d "'" || echo "")
+              
+              # Process each image reference
+              if [ -n "$K8S_IMAGE_REFS" ]; then
+                for IMAGE_REF in $K8S_IMAGE_REFS; do
+                  # Check if it's an ECR URL
+                  if [[ "$IMAGE_REF" == *.dkr.ecr.*.amazonaws.com/* ]]; then
+                    echo "Found ECR image reference in K8s manifests: $IMAGE_REF"
+                    
+                    # Extract account ID and region from the ECR URL
+                    ECR_URL_PATTERN="([0-9]+)\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com"
+                    if [[ "$IMAGE_REF" =~ $ECR_URL_PATTERN ]]; then
+                      ECR_ACCOUNT_ID="${BASH_REMATCH[1]}"
+                      ECR_REGION="${BASH_REMATCH[2]}"
+                      authenticate_cross_account_ecr "$ECR_ACCOUNT_ID" "$ECR_REGION"
+                    fi
+                  fi
+                done
+              fi
+            fi
+          fi
+      
+      - name: Build and push container images
+        if: ${{ github.event.inputs.action == 'up' }}
+        id: build-images
+        run: |
+          # Extract service images from manifest
+          echo "Parsing manifest to find container images to build..."
+          SERVICES=$(yq -r '.services[].name' ${{ github.event.inputs.manifest_path }})
+          
+          # For each service that has a Dockerfile, build and push it
+          for SERVICE in $SERVICES; do
+            if [ -d "./${SERVICE}" ] && [ -f "./${SERVICE}/Dockerfile" ]; then
+              echo "Building image for service: ${SERVICE}"
+              
+              # Create ECR repository if it doesn't exist
+              aws ecr describe-repositories --repository-names ${SERVICE} --region ${AWS_REGION} || \
+              aws ecr create-repository --repository-name ${SERVICE} --region ${AWS_REGION}
+              
+              # Build and push
+              IMAGE_TAG="github-${GITHUB_SHA::8}"
+              FULL_IMAGE_NAME="${{ steps.ecr-login.outputs.ecr_registry }}/${SERVICE}:${IMAGE_TAG}"
+              
+              docker build -t ${FULL_IMAGE_NAME} ./${SERVICE}
+              docker push ${FULL_IMAGE_NAME}
+              
+              # Update manifest with the new image
+              if [[ "$OSTYPE" == "darwin"* ]]; then
+                # macOS version
+                sed -i '' "s|image:.*${SERVICE}:.*|image: ${FULL_IMAGE_NAME}|g" ${{ github.event.inputs.manifest_path }}
+              else
+                # Linux version
+                sed -i "s|image:.*${SERVICE}:.*|image: ${FULL_IMAGE_NAME}|g" ${{ github.event.inputs.manifest_path }}
+              fi
+              
+              echo "Pushed image: ${FULL_IMAGE_NAME}"
+            fi
+          done
           
       - name: Create environment
         if: ${{ github.event.inputs.action == 'up' }}
@@ -97,7 +223,65 @@ jobs:
           fi
           
           # Run the command with all flags
-          buildandburn up --manifest ${{ github.event.inputs.manifest_path }} $EXTRA_FLAGS
+          buildandburn up --manifest ${{ github.event.inputs.manifest_path }} $EXTRA_FLAGS --auto-approve
+          
+          # Get environment ID from output or metadata
+          ENV_ID=$(buildandburn list --json | jq -r '.environments[-1].id')
+          echo "env_id=$ENV_ID" >> $GITHUB_ENV
+          
+          # Verify deployment
+          echo "Verifying deployment..."
+          buildandburn info --env-id $ENV_ID
+          
+          # Wait for ingress controller to be ready
+          KUBECONFIG_PATH="~/.buildandburn/${ENV_ID}/kubeconfig"
+          echo "Waiting for ingress controller to be ready..."
+          
+          ATTEMPTS=0
+          MAX_ATTEMPTS=30
+          WAIT_TIME=10
+          INGRESS_READY=false
+          
+          while [ $ATTEMPTS -lt $MAX_ATTEMPTS ] && [ "$INGRESS_READY" != "true" ]; do
+            INGRESS_IP=$(KUBECONFIG=$KUBECONFIG_PATH kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+            
+            if [ -n "$INGRESS_IP" ]; then
+              echo "Ingress controller is ready: $INGRESS_IP"
+              INGRESS_READY=true
+            else
+              ATTEMPTS=$((ATTEMPTS+1))
+              echo "Waiting for ingress controller... Attempt $ATTEMPTS/$MAX_ATTEMPTS"
+              sleep $WAIT_TIME
+            fi
+          done
+          
+          if [ "$INGRESS_READY" != "true" ]; then
+            echo "Warning: Ingress controller is not ready after $MAX_ATTEMPTS attempts"
+          fi
+          
+          # Test each service with its health endpoint
+          echo "Testing service endpoints..."
+          for SERVICE in $SERVICES; do
+            SERVICE_NAMESPACE="bb-$(yq -r '.name' ${{ github.event.inputs.manifest_path }})"
+            
+            # Try to find a health or readiness endpoint
+            for ENDPOINT in "/health" "/readiness" "/ready" "/api/health" "/status"; do
+              echo "Testing $SERVICE at $ENDPOINT..."
+              INGRESS_HOST=$(KUBECONFIG=$KUBECONFIG_PATH kubectl get ingress $SERVICE -n $SERVICE_NAMESPACE -o jsonpath='{.spec.rules[0].host}' 2>/dev/null)
+              
+              if [ -n "$INGRESS_HOST" ] && [ -n "$INGRESS_IP" ]; then
+                # Use curl with Host header
+                HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: $INGRESS_HOST" "http://$INGRESS_IP$ENDPOINT")
+                
+                if [ "$HTTP_STATUS" == "200" ]; then
+                  echo "✅ Service $SERVICE is healthy!"
+                  break
+                else
+                  echo "⚠️ Service $SERVICE returned status $HTTP_STATUS at $ENDPOINT"
+                fi
+              fi
+            done
+          done
         
       - name: Destroy environment
         if: ${{ github.event.inputs.action == 'down' }}
@@ -106,7 +290,7 @@ jobs:
             echo "::error::env_id is required for down action"
             exit 1
           fi
-          buildandburn down --env-id ${{ github.event.inputs.env_id }} --force
+          buildandburn down --env-id ${{ github.event.inputs.env_id }} --force --auto-approve
           
       - name: Get environment info
         if: ${{ github.event.inputs.action == 'info' }}
@@ -115,7 +299,7 @@ jobs:
             echo "::error::env_id is required for info action"
             exit 1
           fi
-          buildandburn info --env-id ${{ github.event.inputs.env_id }}
+          buildandburn info --env-id ${{ github.event.inputs.env_id }} --detailed
           
       - name: Upload logs
         if: ${{ always() }}

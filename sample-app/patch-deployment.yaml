@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-app
+  namespace: bb-postgres-app
+spec:
+  template:
+    metadata:
+      annotations:
+        kubernetes.io/enforced-image-pull-policy: "Always"
+    spec:
+      containers:
+      - name: postgres-app
+        image: 395402194296.dkr.ecr.eu-west-2.amazonaws.com/postgres-app:latest
+        imagePullPolicy: Always
+        env:
+        - name: PLATFORM_DEBUG
+          value: "true" 

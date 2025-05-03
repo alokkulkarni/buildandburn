@@ -114,7 +114,7 @@ output "kafka_arn" {
 output "kafka_secret_arn" {
   description = "ARN of the secret containing Kafka configuration"
   value       = contains(var.dependencies, "kafka") ? module.kafka[0].kafka_secret_arn : null
-}
+} 
 
 # Ingress controller outputs
 output "ingress_controller_enabled" {

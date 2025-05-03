@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ecr-diagnostic-pod
+  namespace: bb-postgres-app
+spec:
+  containers:
+  - name: aws-cli
+    image: amazon/aws-cli:latest
+    command:
+    - /bin/bash
+    - -c
+    - |
+      echo "Node IAM Role Information:"
+      curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/ || echo "Could not access instance metadata"
+      echo "===== Testing ECR Authentication ====="
+      aws ecr get-authorization-token --region eu-west-2 || echo "Failed to get ECR token"
+      echo "===== Done testing ====="
+      sleep 3600
+  restartPolicy: Never 

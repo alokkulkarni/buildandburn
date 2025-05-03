@@ -114,4 +114,25 @@ output "kafka_arn" {
 output "kafka_secret_arn" {
   description = "ARN of the secret containing Kafka configuration"
   value       = contains(var.dependencies, "kafka") ? module.kafka[0].kafka_secret_arn : null
+}
+
+# Ingress controller outputs
+output "ingress_controller_enabled" {
+  description = "Whether the ingress controller is enabled"
+  value       = var.enable_ingress
+}
+
+output "ingress_controller_hostname" {
+  description = "The hostname of the ingress controller load balancer"
+  value       = var.enable_ingress ? module.k8s_ingress[0].ingress_hostname : null
+}
+
+output "ingress_controller_ip" {
+  description = "The IP address of the ingress controller load balancer"
+  value       = var.enable_ingress ? module.k8s_ingress[0].ingress_ip : null
+}
+
+output "ingress_controller_namespace" {
+  description = "The namespace where the ingress controller is deployed"
+  value       = var.enable_ingress ? module.k8s_ingress[0].ingress_namespace : null
 } 

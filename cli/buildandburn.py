@@ -57,6 +57,12 @@ TERRAFORM_MIN_VERSION = "1.0.0"
 KUBECTL_MIN_VERSION = "1.20.0"
 AWS_CLI_MIN_VERSION = "2.0.0"
 
+# Configuration settings
+CONFIG = {
+    "TERRAFORM_APPLY_TIMEOUT": 3600,  # 1 hour
+    "PROGRESS_UPDATE_INTERVAL": 60,   # 1 minute
+}
+
 #####################################################################
 # Logging and Output Functions
 #####################################################################
@@ -411,13 +417,34 @@ def prepare_terraform_vars(manifest, env_id, project_dir):
     
     tf_vars["dependencies"] = dependencies
     
+    # Determine if ingress should be enabled based on manifest
+    # Check if ingress is explicitly defined in the manifest or if any service has ingress enabled
+    enable_ingress = False
+    
+    # Check if ingress is defined at the manifest level
+    if 'ingress' in manifest and manifest['ingress'].get('enabled', True):
+        enable_ingress = True
+    
+    # Check if any services have ingress enabled
+    if 'services' in manifest:
+        for service in manifest.get('services', []):
+            if service.get('ingress', {}).get('enabled', False):
+                enable_ingress = True
+                break
+    
+    # If not explicitly defined, enable ingress by default for better user experience
+    if not 'ingress' in manifest:
+        enable_ingress = True
+    
+    tf_vars["enable_ingress"] = enable_ingress
+    
     # Add database-specific variables if needed
     if 'database' in dependencies:
         db_config = next((d for d in manifest['dependencies'] if d['type'] == 'database'), None)
         if db_config:
             tf_vars.update({
                 "db_engine": db_config.get('engine', 'postgres'),
-                "db_engine_version": db_config.get('version', '15.3'),
+                "db_engine_version": db_config.get('version', '15'),
                 "db_instance_class": db_config.get('instance_class', 'db.t3.micro'),
                 "db_allocated_storage": int(db_config.get('allocated_storage', 20)),
             })
@@ -425,7 +452,7 @@ def prepare_terraform_vars(manifest, env_id, project_dir):
             print_warning("Database dependency specified but no configuration found. Using defaults.")
             tf_vars.update({
                 "db_engine": "postgres",
-                "db_engine_version": "15.3",
+                "db_engine_version": "15",
                 "db_instance_class": "db.t3.micro",
                 "db_allocated_storage": 20,
             })
@@ -1078,6 +1105,8 @@ def provision_infrastructure(manifest, env_id, terraform_dir, args=None):
         class DefaultArgs:
             auto_approve = False
             skip_module_confirmation = False
+            infrastructure_only = False
+            no_deploy_k8s = False
         args = DefaultArgs()
     
     print_info("=" * 80)
@@ -2169,14 +2198,50 @@ def deploy_to_kubernetes(manifest, tf_output, k8s_dir, project_dir):
     # Get kubeconfig
     print_info("Retrieving kubeconfig from Terraform outputs...")
     if 'kubeconfig' not in tf_output or 'value' not in tf_output['kubeconfig']:
-        print_error("Kubeconfig not found in Terraform outputs")
-        return False
-        
-    kubeconfig = tf_output['kubeconfig']['value']
-    kubeconfig_path = os.path.join(project_dir, "kubeconfig")
-    print_info(f"Saving kubeconfig to: {kubeconfig_path}")
-    with open(kubeconfig_path, 'w') as f:
-        f.write(kubeconfig)
+        print_warning("Kubeconfig not found in Terraform outputs, attempting to get it from the EKS cluster")
+        # Try to get the kubeconfig from the EKS cluster directly
+        try:
+            # Check if cluster_name is available in terraform output
+            if 'cluster_name' in tf_output and 'value' in tf_output['cluster_name']:
+                cluster_name = tf_output['cluster_name']['value']
+                region = manifest.get('region', 'us-west-2')
+                
+                print_info(f"Getting kubeconfig for EKS cluster: {cluster_name} in region {region}")
+                update_kubeconfig_cmd = ["aws", "eks", "update-kubeconfig", 
+                                        "--name", cluster_name, 
+                                        "--region", region]
+                
+                result = run_command(update_kubeconfig_cmd, capture_output=True)
+                if result.returncode == 0:
+                    print_success("Successfully obtained kubeconfig from EKS cluster")
+                    # Get the kubeconfig from the default location
+                    home = os.path.expanduser("~")
+                    default_kubeconfig = os.path.join(home, ".kube", "config")
+                    if os.path.exists(default_kubeconfig):
+                        with open(default_kubeconfig, 'r') as kf:
+                            kubeconfig = kf.read()
+                        kubeconfig_path = os.path.join(project_dir, "kubeconfig")
+                        print_info(f"Saving kubeconfig to: {kubeconfig_path}")
+                        with open(kubeconfig_path, 'w') as f:
+                            f.write(kubeconfig)
+                    else:
+                        print_error("Default kubeconfig not found after update")
+                        return False
+                else:
+                    print_error(f"Failed to get kubeconfig for EKS cluster: {result.stderr}")
+                    return False
+            else:
+                print_error("Cluster name not found in Terraform outputs")
+                return False
+        except Exception as e:
+            print_error(f"Error getting kubeconfig from EKS cluster: {str(e)}")
+            return False
+    else:
+        kubeconfig = tf_output['kubeconfig']['value']
+        kubeconfig_path = os.path.join(project_dir, "kubeconfig")
+        print_info(f"Saving kubeconfig to: {kubeconfig_path}")
+        with open(kubeconfig_path, 'w') as f:
+            f.write(kubeconfig)
     
     # Prepare Kubernetes values
     print_info("Preparing Kubernetes values...")
@@ -2734,55 +2799,133 @@ def deploy_to_kubernetes(manifest, tf_output, k8s_dir, project_dir):
         return False
 
 def get_access_info(kubeconfig_path, namespace, tf_output):
-    """Get access information for the deployed services."""
+    """
+    Get access information for the deployed services.
+    
+    This function uses kubectl to get information about deployed services and ingresses
+    in the Kubernetes cluster.
+    
+    Args:
+        kubeconfig_path (str): Path to the kubeconfig file
+        namespace (str): Kubernetes namespace to get resources from
+        tf_output (dict): Terraform outputs
+        
+    Returns:
+        dict: Dictionary with access information
+    """
+    # Initialize access info structure
     access_info = {
         "services": {},
         "ingresses": {},
-        "database": {},
-        "message_queue": {},
-        "redis": {}
+        "resources": {}
     }
     
+    # Check if the kubeconfig file exists
+    if not os.path.exists(kubeconfig_path):
+        print_warning(f"Kubeconfig not found at {kubeconfig_path}. Cannot retrieve access information.")
+        return access_info
+    
+    # Set up environment for kubectl
+    env = os.environ.copy()
+    env["KUBECONFIG"] = kubeconfig_path
+    
+    # Create a log file for recording command outputs
+    log_file = open(f"{os.path.dirname(kubeconfig_path)}/access_info.log", "w")
+    log_file.write(f"Gathering access information for namespace: {namespace}\n")
+    
     try:
-        # Set the KUBECONFIG environment variable
-        env = os.environ.copy()
-        env["KUBECONFIG"] = kubeconfig_path
+        # Get services
+        service_cmd = ["kubectl", "get", "service", "-n", namespace, "-o", "wide"]
+        print_info(f"Running: {' '.join(service_cmd)}")
+        log_file.write(f"Service command: {' '.join(service_cmd)}\n")
         
-        # Get service endpoints using list format
-        services_result = run_command(
-            ["kubectl", "get", "svc", "-n", namespace, "-o", "json"], 
-            capture_output=True,
-            env=env
+        service_process = subprocess.run(
+            service_cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False
         )
         
-        if hasattr(services_result, 'stdout'):
-            services = json.loads(services_result.stdout)
-            
-            # Service endpoints
-            for svc in services.get("items", []):
-                svc_name = svc["metadata"]["name"]
-                svc_type = svc["spec"]["type"]
+        if service_process.returncode == 0 and service_process.stdout.strip():
+            log_file.write(f"Service output: {service_process.stdout}\n")
+            print_info(f"Deployed services:\n{service_process.stdout}")
+        else:
+            print_info("No services deployed or found.")
+            log_file.write("No services deployed or found.\n")
+        
+        # Get ingresses
+        ingress_cmd = ["kubectl", "get", "ingress", "-n", namespace, "-o", "wide"]
+        print_info(f"Running: {' '.join(ingress_cmd)}")
+        log_file.write(f"Ingress command: {' '.join(ingress_cmd)}\n")
+        
+        ingress_process = subprocess.run(
+            ingress_cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False
+        )
+        
+        if ingress_process.returncode == 0 and ingress_process.stdout.strip():
+            log_file.write(f"Ingress output: {ingress_process.stdout}\n")
+            print_info(f"Deployed ingresses:\n{ingress_process.stdout}")
+        else:
+            print_info("No ingresses deployed or found.")
+            log_file.write("No ingresses deployed or found.\n")
+        
+        # Get service endpoints using JSON format
+        service_result = run_command(
+            ["kubectl", "get", "service", "-n", namespace, "-o", "json"],
+            env=env,
+            capture_output=True,
+            allow_fail=True
+        )
+        
+        # Get service information
+        if hasattr(service_result, 'stdout') and service_result.returncode == 0:
+            try:
+                services = json.loads(service_result.stdout)
                 
-                if svc_type == "LoadBalancer":
-                    if "status" in svc and "loadBalancer" in svc["status"] and "ingress" in svc["status"]["loadBalancer"]:
-                        lb = svc["status"]["loadBalancer"]["ingress"][0]
-                        if "hostname" in lb:
-                            access_info["services"][svc_name] = f"http://{lb['hostname']}"
-                        elif "ip" in lb:
-                            access_info["services"][svc_name] = f"http://{lb['ip']}"
-                    else:
-                        access_info["services"][svc_name] = f"LoadBalancer pending for {svc_name}"
-                else:
-                    access_info["services"][svc_name] = f"Service: {svc_name}.{namespace}.svc.cluster.local"
+                # Service endpoints
+                for svc in services.get("items", []):
+                    svc_name = svc["metadata"]["name"]
+                    svc_type = svc["spec"]["type"]
+                    
+                    # Handle different service types
+                    if svc_type == "LoadBalancer":
+                        if "status" in svc and "loadBalancer" in svc["status"] and "ingress" in svc["status"]["loadBalancer"]:
+                            lb = svc["status"]["loadBalancer"]["ingress"][0]
+                            if "hostname" in lb:
+                                access_info["services"][svc_name] = f"http://{lb['hostname']}"
+                            elif "ip" in lb:
+                                access_info["services"][svc_name] = f"http://{lb['ip']}"
+                            else:
+                                access_info["services"][svc_name] = f"LoadBalancer pending for {svc_name}"
+                        else:
+                            access_info["services"][svc_name] = f"LoadBalancer pending for {svc_name}"
+                    elif svc_type == "NodePort":
+                        if "nodePort" in svc["spec"]["ports"][0]:
+                            node_port = svc["spec"]["ports"][0]["nodePort"]
+                            access_info["services"][svc_name] = f"NodePort {node_port} (requires node IP)"
+                    elif svc_type == "ClusterIP":
+                        cluster_ip = svc["spec"]["clusterIP"]
+                        access_info["services"][svc_name] = f"ClusterIP {cluster_ip} (internal only)"
+            except json.JSONDecodeError:
+                print_warning("Failed to parse service information as JSON")
+                log_file.write("Failed to parse service information as JSON\n")
         
         # Get ingress endpoints using list format
         ingress_result = run_command(
-            ["kubectl", "get", "ingress", "-n", namespace, "-o", "json"], 
-            capture_output=True, 
-            allow_fail=True,
-            env=env
+            ["kubectl", "get", "ingress", "-n", namespace, "-o", "json"],
+            env=env,
+            capture_output=True,
+            allow_fail=True
         )
         
+        # Get ingress information
         if hasattr(ingress_result, 'stdout') and ingress_result.returncode == 0:
             try:
                 ingresses = json.loads(ingress_result.stdout)
@@ -2791,16 +2934,16 @@ def get_access_info(kubeconfig_path, namespace, tf_output):
                 for ing in ingresses.get("items", []):
                     ing_name = ing["metadata"]["name"]
                     
+                    # Try to get the host and status
                     if "status" in ing and "loadBalancer" in ing["status"] and "ingress" in ing["status"]["loadBalancer"]:
-                        ing_hosts = []
-                        
-                        # Get all hosts defined in the ingress
-                        if "rules" in ing["spec"]:
+                        # Find hosts in the ingress spec
+                        hosts = []
+                        if "spec" in ing and "rules" in ing["spec"]:
                             for rule in ing["spec"]["rules"]:
                                 if "host" in rule:
-                                    ing_hosts.append(rule["host"])
+                                    hosts.append(rule["host"])
                         
-                        # Get the load balancer address
+                        # Get the load balancer addresses (could be hostnames or IPs)
                         lb_addresses = []
                         for lb in ing["status"]["loadBalancer"]["ingress"]:
                             if "hostname" in lb:
@@ -2808,59 +2951,88 @@ def get_access_info(kubeconfig_path, namespace, tf_output):
                             elif "ip" in lb:
                                 lb_addresses.append(lb["ip"])
                         
-                        if ing_hosts and lb_addresses:
-                            # Combine hosts with load balancer for URLs
-                            for host in ing_hosts:
-                                if host:
-                                    access_info["ingresses"][ing_name] = f"http://{host}"
-                                else:
-                                    access_info["ingresses"][ing_name] = f"http://{lb_addresses[0]}"
+                        # Determine the URL to show
+                        if hosts and lb_addresses:
+                            # If we have both hosts and lb addresses, use host for a nicer URL
+                            host = hosts[0]
+                            access_info["ingresses"][ing_name] = f"http://{host}"
                         elif lb_addresses:
+                            # Otherwise just use the LB address directly
                             access_info["ingresses"][ing_name] = f"http://{lb_addresses[0]}"
                         else:
                             access_info["ingresses"][ing_name] = f"Ingress address pending for {ing_name}"
+                    else:
+                        access_info["ingresses"][ing_name] = f"Ingress address pending for {ing_name}"
             except json.JSONDecodeError:
                 print_warning("Failed to parse ingress information as JSON")
+                log_file.write("Failed to parse ingress information as JSON\n")
+
+        # Check terraform outputs for ingress controller information
+        # This is used when the user doesn't deploy specific ingresses but can use the ingress controller directly
+        if not access_info["ingresses"] and tf_output and "ingress_controller_hostname" in tf_output and tf_output["ingress_controller_hostname"]["value"]:
+            ingress_hostname = tf_output["ingress_controller_hostname"]["value"]
+            if ingress_hostname:
+                access_info["ingresses"]["nginx-ingress-controller"] = f"http://{ingress_hostname}"
+                print_info(f"Found NGINX Ingress Controller at: http://{ingress_hostname}")
+                log_file.write(f"Found NGINX Ingress Controller at: http://{ingress_hostname}\n")
+        elif not access_info["ingresses"] and tf_output and "ingress_controller_ip" in tf_output and tf_output["ingress_controller_ip"]["value"]:
+            ingress_ip = tf_output["ingress_controller_ip"]["value"]
+            if ingress_ip:
+                access_info["ingresses"]["nginx-ingress-controller"] = f"http://{ingress_ip}"
+                print_info(f"Found NGINX Ingress Controller at: http://{ingress_ip}")
+                log_file.write(f"Found NGINX Ingress Controller at: http://{ingress_ip}\n")
+        
+        # Add a 'primary_url' field that identifies the main application URL
+        # Determine the primary URL from ingresses or services
+        if access_info["ingresses"]:
+            # Prefer the first ingress
+            primary_ingress = list(access_info["ingresses"].keys())[0]
+            access_info["primary_url"] = access_info["ingresses"][primary_ingress]
+        elif access_info["services"]:
+            # If no ingresses, use the first LoadBalancer service
+            for svc_name, svc_url in access_info["services"].items():
+                if svc_url.startswith("http://"):
+                    access_info["primary_url"] = svc_url
+                    break
+                    
+        # Add other resources too (Databases, Queues, etc.)
+        if tf_output:
+            # Database
+            if "database_endpoint" in tf_output and tf_output["database_endpoint"]["value"]:
+                access_info["resources"]["database"] = {
+                    "endpoint": tf_output["database_endpoint"]["value"],
+                    "username": tf_output["database_username"]["value"] if "database_username" in tf_output else None,
+                    # Password is not included here for security reasons
+                }
+                
+            # Message Queue
+            if "mq_endpoint" in tf_output and tf_output["mq_endpoint"]["value"]:
+                access_info["resources"]["queue"] = {
+                    "endpoint": tf_output["mq_endpoint"]["value"],
+                    "username": tf_output["mq_username"]["value"] if "mq_username" in tf_output else None,
+                    # Password is not included here for security reasons
+                }
+                
+            # Redis
+            if "redis_primary_endpoint" in tf_output and tf_output["redis_primary_endpoint"]["value"]:
+                access_info["resources"]["redis"] = {
+                    "primary_endpoint": tf_output["redis_primary_endpoint"]["value"],
+                    "reader_endpoint": tf_output["redis_reader_endpoint"]["value"] if "redis_reader_endpoint" in tf_output else None,
+                    "port": tf_output["redis_port"]["value"] if "redis_port" in tf_output else 6379,
+                }
+                
+            # Kafka
+            if "kafka_bootstrap_brokers" in tf_output and tf_output["kafka_bootstrap_brokers"]["value"]:
+                access_info["resources"]["kafka"] = {
+                    "bootstrap_brokers": tf_output["kafka_bootstrap_brokers"]["value"],
+                    "bootstrap_brokers_tls": tf_output["kafka_bootstrap_brokers_tls"]["value"] if "kafka_bootstrap_brokers_tls" in tf_output else None,
+                }
     except Exception as e:
-        print_warning(f"Failed to get complete service access information: {str(e)}")
-    
-    # Database connection info
-    if 'database_endpoint' in tf_output and tf_output['database_endpoint']['value']:
-        access_info["database"] = {
-            "endpoint": tf_output['database_endpoint']['value'],
-            "username": tf_output['database_username']['value'],
-            "password": "(hidden for security)"
-        }
-    
-    # Message queue connection info
-    if 'mq_endpoint' in tf_output and tf_output['mq_endpoint']['value']:
-        access_info["message_queue"] = {
-            "endpoint": tf_output['mq_endpoint']['value'],
-            "username": tf_output['mq_username']['value'],
-            "password": "(hidden for security)"
-        }
-    
-    # Redis connection info
-    if 'redis_primary_endpoint' in tf_output and tf_output['redis_primary_endpoint']['value']:
-        access_info["redis"] = {
-            "primary_endpoint": tf_output['redis_primary_endpoint']['value'],
-            "reader_endpoint": tf_output.get('redis_reader_endpoint', {}).get('value', ""),
-            "port": tf_output.get('redis_port', {}).get('value', 6379),
-            "connection_url": "(hidden for security)"
-        }
-    
-    # Add a 'primary_url' field that identifies the main application URL
-    # Determine the primary URL from ingresses or services
-    if access_info["ingresses"]:
-        # Prefer the first ingress
-        primary_ingress = list(access_info["ingresses"].keys())[0]
-        access_info["primary_url"] = access_info["ingresses"][primary_ingress]
-    elif access_info["services"]:
-        # If no ingresses, use the first LoadBalancer service
-        for svc_name, svc_url in access_info["services"].items():
-            if svc_url.startswith("http://"):
-                access_info["primary_url"] = svc_url
-                break
+        print_error(f"Error getting access information: {str(e)}")
+        log_file.write(f"Error getting access information: {str(e)}\n")
+        traceback.print_exc(file=log_file)
+    finally:
+        log_file.close()
     
     return access_info
 
@@ -2959,6 +3131,145 @@ def analyze_terraform_errors(error_output):
         "error_details": error_details
     }
 
+def fix_terraform_issues(terraform_project_dir, error_analysis, tf_vars_file, region):
+    """
+    Attempt to fix Terraform issues based on error analysis.
+    
+    Args:
+        terraform_project_dir (str): Path to Terraform project directory
+        error_analysis (dict): Analysis of errors from analyze_terraform_errors
+        tf_vars_file (str): Path to the Terraform variables file
+        region (str): AWS region
+        
+    Returns:
+        bool: True if any fixes were applied, False otherwise
+    """
+    if not error_analysis["auto_fix_possible"]:
+        print_info("No auto-fixable issues detected")
+        return False
+
+    fixed = False
+    
+    for action in error_analysis["fix_actions"]:
+        if action == "add_provider_config":
+            if add_provider_config(terraform_project_dir):
+                fixed = True
+        
+        elif action == "reinit_upgrade":
+            print_info("Attempting to reinitialize with upgrade...")
+            try:
+                run_command("terraform init -upgrade", cwd=terraform_project_dir)
+                fixed = True
+            except Exception as e:
+                print_error(f"Reinitialize failed: {str(e)}")
+        
+        elif action == "check_required_vars":
+            print_info("Checking for required variables...")
+            try:
+                # Get list of required variables
+                result = run_command("terraform plan -detailed-exitcode", 
+                                    cwd=terraform_project_dir,
+                                    capture_output=True,
+                                    allow_fail=True)
+                if result.stderr and "No value for required variable" in result.stderr:
+                    # Extract missing variable names
+                    missing_vars = re.findall(r'No value for required variable "([^"]+)"', result.stderr)
+                    
+                    if missing_vars and tf_vars_file:
+                        print_info(f"Adding missing variables to {tf_vars_file}: {', '.join(missing_vars)}")
+                        with open(tf_vars_file, 'a') as f:
+                            for var in missing_vars:
+                                if var == "region" and region:
+                                    f.write(f'\nregion = "{region}"\n')
+                                else:
+                                    f.write(f'\n{var} = ""\n')
+                        fixed = True
+            except Exception as e:
+                print_error(f"Variable check failed: {str(e)}")
+        
+        elif action == "fix_duplicate_providers":
+            print_info("Attempting to fix duplicate provider definitions...")
+            try:
+                # Find all provider definitions
+                provider_files = []
+                for root, dirs, files in os.walk(terraform_project_dir):
+                    for file in files:
+                        if file.endswith(".tf"):
+                            file_path = os.path.join(root, file)
+                            with open(file_path, 'r') as f:
+                                content = f.read()
+                                if 'provider "aws"' in content:
+                                    provider_files.append(file_path)
+                
+                if len(provider_files) > 1:
+                    print_info(f"Found multiple provider definitions in: {', '.join(provider_files)}")
+                    
+                    # Keep the main provider definition and comment out others
+                    main_provider = provider_files[0]
+                    for provider_file in provider_files[1:]:
+                        with open(provider_file, 'r') as f:
+                            content = f.read()
+                        
+                        # Comment out the provider block
+                        modified_content = re.sub(
+                            r'(provider\s+"aws"\s+{[^}]*})', 
+                            r'# Commented due to duplicate provider\n# \1', 
+                            content
+                        )
+                        
+                        with open(provider_file, 'w') as f:
+                            f.write(modified_content)
+                    
+                    fixed = True
+            except Exception as e:
+                print_error(f"Provider fix failed: {str(e)}")
+        
+        elif action == "clear_plugin_cache":
+            print_info("Clearing plugin cache...")
+            try:
+                # Remove .terraform directory
+                shutil.rmtree(os.path.join(terraform_project_dir, ".terraform"), ignore_errors=True)
+                # Remove lock file
+                for f in glob.glob(os.path.join(terraform_project_dir, ".terraform.lock.hcl")):
+                    os.remove(f)
+                    
+                # Reinitialize
+                run_command("terraform init -reconfigure", cwd=terraform_project_dir)
+                fixed = True
+            except Exception as e:
+                print_error(f"Cache clearing failed: {str(e)}")
+    
+    # Additional fix: For tags that are duplicated in default_tags
+    if "tags are identical to those in the" in str(error_analysis):
+        print_info("Attempting to fix duplicate tags issue...")
+        try:
+            # Identify problematic modules
+            modules_dir = os.path.join(terraform_project_dir, "modules")
+            for module_name in ["rds", "mq"]:
+                module_path = os.path.join(modules_dir, module_name)
+                if os.path.exists(module_path):
+                    main_tf = os.path.join(module_path, "main.tf")
+                    if os.path.exists(main_tf):
+                        with open(main_tf, 'r') as f:
+                            content = f.read()
+                        
+                        # Fix the secretsmanager resource tags
+                        modified_content = re.sub(
+                            r'(resource\s+"aws_secretsmanager_secret"\s+"[^"]+"\s+{[^}]*)\s+tags\s+=\s+var\.tags',
+                            r'\1\n  tags = {}',
+                            content
+                        )
+                        
+                        if modified_content != content:
+                            with open(main_tf, 'w') as f:
+                                f.write(modified_content)
+                            print_info(f"Fixed duplicate tags in {module_name} module")
+                            fixed = True
+        except Exception as e:
+            print_error(f"Tags fix failed: {str(e)}")
+    
+    return fixed
+
 def cmd_up(args):
     """
     Handle the 'up' command to create/update infrastructure and deploy services.
@@ -3033,13 +3344,59 @@ def cmd_up(args):
             # Continue to show access info even if deployment failed partially
         
         # Get access information
-        get_access_info(os.path.join(project_dir, "kubeconfig"), f"bb-{manifest['name']}", tf_output)
+        access_info = get_access_info(os.path.join(project_dir, "kubeconfig"), f"bb-{manifest['name']}", tf_output)
     else:
         print_info("Skipping Kubernetes deployment per --no-deploy-k8s flag")
-        get_access_info(os.path.join(project_dir, "kubeconfig"), f"bb-{manifest['name']}", tf_output)
+        access_info = get_access_info(os.path.join(project_dir, "kubeconfig"), f"bb-{manifest['name']}", tf_output)
     
     print_success(f"🎉 Environment created successfully: {manifest['name']} ({env_id})")
     print_info(f"Environment directory: {project_dir}")
+    
+    # Display access information in a more user-friendly way
+    kubeconfig_path = os.path.join(project_dir, "kubeconfig")
+    namespace = f"bb-{manifest['name']}"
+    
+    print_info("=" * 80)
+    print_info("ACCESS INFORMATION")
+    print_info("=" * 80)
+    
+    if "primary_url" in access_info:
+        print_success(f"PRIMARY APPLICATION URL: {access_info['primary_url']}")
+    else:
+        print_warning("No primary application URL available")
+    
+    # If there are LoadBalancer services, show them
+    lb_services = False
+    for svc_name, svc_url in access_info.get("services", {}).items():
+        if not svc_url.startswith("Service:"):
+            lb_services = True
+            print_info(f"Service '{svc_name}' is available at: {svc_url}")
+    
+    if not lb_services:
+        print_warning("No LoadBalancer services are available yet")
+        print_info("The LoadBalancer may still be provisioning. Run the following to check service status:")
+        print_info(f"  KUBECONFIG={kubeconfig_path} kubectl get svc -n {namespace}")
+    
+    # If there are ingresses, show them
+    if access_info.get("ingresses", {}):
+        for ing_name, ing_url in access_info["ingresses"].items():
+            print_info(f"Ingress '{ing_name}' is available at: {ing_url}")
+            print_info(f"Note: You may need to set up DNS for {ing_url.split('//')[1]} to work properly")
+    
+    # Show available commands for users
+    print_info("=" * 80)
+    print_info("USEFUL COMMANDS")
+    print_info("=" * 80)
+    print_info(f"Get service status:  KUBECONFIG={kubeconfig_path} kubectl get svc -n {namespace}")
+    print_info(f"Get pod status:      KUBECONFIG={kubeconfig_path} kubectl get pods -n {namespace}")
+    print_info(f"View application logs: KUBECONFIG={kubeconfig_path} kubectl logs -n {namespace} deployment/postgres-app")
+    print_info(f"Port-forward to app: KUBECONFIG={kubeconfig_path} kubectl port-forward -n {namespace} svc/postgres-app 8080:80")
+    print_info("Then access: http://localhost:8080")
+    
+    print_info("=" * 80)
+    print_info("To destroy this environment later, run:")
+    print_info(f"  python3 cli/buildandburn.py down -i {env_id} -a")
+    print_info("=" * 80)
     
     return True
 
@@ -3134,14 +3491,8 @@ def cmd_down(args):
         
         print_info(f"Running Terraform destroy in {terraform_dir}")
         try:
-            # Use input=b"yes\n" to auto-confirm the destroy operation if -auto-approve is not used
-            if "-auto-approve" in destroy_cmd:
-                run_command(destroy_cmd, cwd=terraform_dir)
-            else:
-                # Create a subprocess with input piping capability for non-auto-approve mode
-                print_info("You will need to confirm the destroy operation when prompted by Terraform.")
-                subprocess.run(destroy_cmd, cwd=terraform_dir, check=True)
-            
+            # Use run_command directly which handles both auto-approve and non-auto-approve cases
+            run_command(destroy_cmd, cwd=terraform_dir)
             print_success("Infrastructure destroyed successfully")
         except Exception as e:
             print_error(f"Error during Terraform destroy: {str(e)}")
@@ -3175,13 +3526,16 @@ def cmd_info(args):
     
     Args:
         args (argparse.Namespace): Command-line arguments including:
-            - env_id (str): Environment ID to get information for
+            - env_id (str): Environment ID to get information for (positional)
+            - env_id_flag (str): Environment ID to get information for (flag-based)
             - detailed (bool): Display more detailed information
             
     Returns:
         bool: True if successful, False otherwise
     """
-    env_id = args.env_id
+    # Get env_id from either positional argument or flag
+    env_id = args.env_id if args.env_id else args.env_id_flag
+    
     print_info("=" * 80)
     print_info("BUILD AND BURN - ENVIRONMENT INFORMATION")
     print_info("=" * 80)
@@ -3240,9 +3594,69 @@ def cmd_info(args):
             # Try to get kubeconfig if available
             kubeconfig_path = os.path.join(env_dir, "kubeconfig")
             if os.path.exists(kubeconfig_path):
-                get_access_info(kubeconfig_path, f"bb-{project_name}", tf_output)
+                namespace = f"bb-{project_name}"
+                access_info = get_access_info(kubeconfig_path, namespace, tf_output)
+                
+                # Enhanced display of access information
+                if "primary_url" in access_info:
+                    print_success(f"PRIMARY APPLICATION URL: {access_info['primary_url']}")
+                else:
+                    print_warning("No primary application URL available yet")
+                
+                # Check if LoadBalancer is still pending
+                pending_lb = False
+                for svc_name, svc_url in access_info.get("services", {}).items():
+                    if "pending" in svc_url.lower():
+                        pending_lb = True
+                        print_warning(f"LoadBalancer for '{svc_name}' is still being provisioned")
+                    elif not svc_url.startswith("Service:"):
+                        print_info(f"Service '{svc_name}' is available at: {svc_url}")
+                
+                if pending_lb:
+                    # Try to update loadbalancer status
+                    try:
+                        print_info("Checking for updates on LoadBalancer status...")
+                        env = os.environ.copy()
+                        env["KUBECONFIG"] = kubeconfig_path
+                        result = run_command(["kubectl", "get", "svc", "-n", namespace], capture_output=True, env=env)
+                        if result.returncode == 0:
+                            print_info("Current service status:")
+                            print_info(result.stdout)
+                    except Exception as e:
+                        print_warning(f"Could not check LoadBalancer status: {str(e)}")
+                
+                # Display ingress information
+                if access_info.get("ingresses", {}):
+                    for ing_name, ing_url in access_info["ingresses"].items():
+                        print_info(f"Ingress '{ing_name}' is available at: {ing_url}")
+                
+                # Show useful commands
+                print_info("=" * 80)
+                print_info("USEFUL COMMANDS")
+                print_info("=" * 80)
+                print_info(f"Get service status:  KUBECONFIG={kubeconfig_path} kubectl get svc -n {namespace}")
+                print_info(f"Get pods status:     KUBECONFIG={kubeconfig_path} kubectl get pods -n {namespace}")
+                print_info(f"Port-forward to app: KUBECONFIG={kubeconfig_path} kubectl port-forward -n {namespace} svc/postgres-app 8080:80")
+                print_info("Then access: http://localhost:8080")
             else:
-                print_info("Kubeconfig not found. Infrastructure might not include Kubernetes.")
+                print_warning("Kubeconfig not found. Infrastructure might not include Kubernetes.")
+                # Try to fetch kubeconfig from EKS cluster
+                if "eks_cluster_name" in tf_output and tf_output["eks_cluster_name"]["value"]:
+                    print_info("Attempting to get kubeconfig from EKS cluster...")
+                    try:
+                        cluster_name = tf_output["eks_cluster_name"]["value"]
+                        region = tf_output.get("region", {}).get("value", "eu-west-2")
+                        update_cmd = ["aws", "eks", "update-kubeconfig", "--name", cluster_name, "--region", region]
+                        result = run_command(update_cmd, capture_output=True)
+                        if result.returncode == 0:
+                            print_success("Successfully obtained kubeconfig from EKS cluster")
+                            print_info("Run the info command again to see access information")
+                            return True
+                    except Exception as e:
+                        print_warning(f"Failed to get kubeconfig from EKS cluster: {str(e)}")
+                
+                print_info("To access the infrastructure, first get the kubeconfig from AWS EKS:")
+                print_info("  aws eks update-kubeconfig --name <cluster-name> --region <region>")
                 
                 # Show raw Terraform outputs if detailed info requested
                 if args.detailed:
@@ -3845,7 +4259,9 @@ def main():
     parser_up.add_argument('-m', '--manifest', required=True, help='Path to the manifest file')
     parser_up.add_argument('-i', '--env-id', help='Environment ID (generated if not provided)')
     parser_up.add_argument('-a', '--auto-approve', action='store_true', help='Auto-approve Terraform operations')
+    parser_up.add_argument('--infrastructure-only', action='store_true', help='Only provision infrastructure, skip Kubernetes deployment')
     parser_up.add_argument('--no-generate-k8s', action='store_true', help='Disable automatic generation of Kubernetes resources')
+    parser_up.add_argument('--no-deploy-k8s', action='store_true', help='Skip deploying to Kubernetes after creating infrastructure')
     parser_up.add_argument('--dry-run', action='store_true', help='Validate configuration without creating resources')
     parser_up.add_argument('--skip-module-confirmation', action='store_true', help='Skip confirmation when policy modules or required modules are missing')
     parser_up.set_defaults(func=cmd_up)
@@ -3860,7 +4276,9 @@ def main():
     
     # Info command
     parser_info = subparsers.add_parser('info', help='Get information about an environment')
-    parser_info.add_argument('env_id', help='Environment ID to get information about')
+    parser_info.add_argument('env_id', nargs='?', help='Environment ID to get information about')
+    parser_info.add_argument('-i', '--env-id', dest='env_id_flag', help='Environment ID to get information about (alternative to positional argument)')
+    parser_info.add_argument('-d', '--detailed', action='store_true', help='Display more detailed information')
     parser_info.set_defaults(func=cmd_info)
     
     # List command

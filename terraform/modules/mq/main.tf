@@ -106,7 +106,7 @@ resource "aws_secretsmanager_secret" "mq_credentials" {
   name        = "${var.project_name}-${var.env_id}-mq-credentials"
   description = "Message broker credentials for build-and-burn environment"
 
-  tags = var.tags
+  tags = {}
 }
 
 resource "aws_secretsmanager_secret_version" "mq_credentials" {

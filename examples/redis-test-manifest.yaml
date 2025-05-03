@@ -1,6 +1,6 @@
 name: redis-test-app
 version: 1.0.0
-region: us-west-2
+region: eu-west-2
 
 dependencies:
   - type: database

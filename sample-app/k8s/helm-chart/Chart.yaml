@@ -1,0 +1,13 @@
+apiVersion: v2
+name: postgres-app
+description: A Helm chart for PostgreSQL sample application running on EKS
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - postgres
+  - flask
+  - api
+maintainers:
+  - name: YourName
+    email: your.email@example.com 

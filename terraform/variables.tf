@@ -158,4 +158,10 @@ variable "redis_multi_az_enabled" {
   description = "Enable Multi-AZ deployment for the ElastiCache cluster"
   type        = bool
   default     = false
+}
+
+variable "enable_ingress" {
+  description = "Whether to enable and install NGINX ingress controller"
+  type        = bool
+  default     = true # Enable by default for better user experience
 } 

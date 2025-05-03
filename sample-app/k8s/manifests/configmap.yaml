@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-app-config
+  labels:
+    app: postgres-app
+data:
+  DB_HOST: "YOUR_RDS_ENDPOINT"  # Will be replaced with actual RDS endpoint
+  DB_PORT: "5432"
+  DB_NAME: "sample_db"
+  DB_USER: "postgres"  # Not recommended to store credentials in ConfigMap for production 

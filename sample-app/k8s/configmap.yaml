@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-app-config
+  labels:
+    app: postgres-app
+data:
+  config.json: |
+    {
+      "log_level": "INFO",
+      "enable_metrics": true,
+      "cors": {
+        "allowed_origins": ["https://postgres-app.example.com"],
+        "allowed_methods": ["GET", "POST", "OPTIONS"]
+      }
+    } 

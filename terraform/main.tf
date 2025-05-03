@@ -258,4 +258,17 @@ provider "helm" {
       command     = "aws"
     }
   }
+}
+
+# Install NGINX ingress controller if ingress is enabled in the manifest
+module "k8s_ingress" {
+  source = "./modules/k8s-ingress"
+  count  = var.enable_ingress ? 1 : 0
+
+  project_name      = local.project_name
+  env_id            = local.env_id
+  tags              = local.tags
+  eks_node_group_id = module.eks.node_group_id
+
+  depends_on = [module.eks]
 } 

@@ -56,7 +56,7 @@ resource "aws_db_subnet_group" "main" {
 # Parameter group for the database
 resource "aws_db_parameter_group" "main" {
   name   = "${var.project_name}-${var.env_id}-db-params"
-  family = "${var.engine}${var.engine_version}"
+  family = "${var.engine}${split(".", var.engine_version)[0]}"
 
   parameter {
     name  = "log_connections"
@@ -112,7 +112,7 @@ resource "aws_secretsmanager_secret" "db_credentials" {
   name        = "${var.project_name}-${var.env_id}-db-credentials"
   description = "Database credentials for build-and-burn environment"
 
-  tags = var.tags
+  tags = {}
 }
 
 resource "aws_secretsmanager_secret_version" "db_credentials" {

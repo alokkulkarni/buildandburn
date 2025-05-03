@@ -1,5 +1,5 @@
 name: test-minimal-valid
-region: us-west-2
+region: eu-west-2
 
 # Services to deploy
 services:

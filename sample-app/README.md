@@ -9,9 +9,10 @@ The application can be deployed using the unified deployment script `deploy.sh`.
 1. Builds the Docker image for the application
 2. Creates an ECR repository and pushes the image
 3. Updates the manifest file with the correct ECR path
-4. Uses BuildAndBurn to provision AWS infrastructure (including EKS cluster, RDS database, and ingress controller)
-5. Deploys the application to Kubernetes
-6. Displays access information when completed
+4. Adds the `k8s_path` parameter to the manifest file to identify Kubernetes resources
+5. Uses BuildAndBurn to provision AWS infrastructure (including EKS cluster, RDS database, and ingress controller)
+6. Deploys the application to Kubernetes
+7. Displays access information when completed
 
 ### Prerequisites
 
@@ -44,6 +45,18 @@ MANIFEST_FILE=../examples/custom-manifest.yaml ./deploy.sh
 # Customize the image name and tag
 IMAGE_NAME=my-postgres-app IMAGE_TAG=v1.0 ./deploy.sh
 ```
+
+### Understanding the Manifest
+
+The deployment script modifies the manifest file to add:
+
+1. **The ECR image path**: Updates the image reference to use the correct ECR repository.
+2. **The k8s_path**: Adds a `k8s_path` parameter pointing to the `sample-app/k8s` directory.
+
+The `k8s_path` parameter tells BuildAndBurn where to find the Kubernetes resources. It will:
+- Use Helm charts if it finds `Chart.yaml` in the directory
+- Use plain Kubernetes manifests from the `manifests` subdirectory if no Helm chart is found
+- All resource substitutions (like database credentials) are handled automatically
 
 ### Getting Deployment Information
 

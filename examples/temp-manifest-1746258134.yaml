@@ -1,0 +1,93 @@
+name: postgres-app
+version: 1.0.0
+description: Sample Flask application that connects to PostgreSQL RDS
+region: eu-west-2  # AWS region where infrastructure will be provisioned
+
+# Infrastructure dependencies - AWS services that will be created
+dependencies:
+  - type: database
+    provider: postgres
+    version: "15"  # Latest stable PostgreSQL version
+    engine: postgres
+    instance_class: db.t3.small  # Right-sized for production workloads
+    allocated_storage: 20
+    backup_retention_period: 7  # Keep backups for 1 week
+    multi_az: true  # High availability setup for production
+    deletion_protection: true  # Prevent accidental deletion
+    parameters:
+      max_connections: 100
+
+# Services to be deployed to Kubernetes
+services:
+  - name: postgres-app
+    image: 395402194296.dkr.ecr.eu-west-2.amazonaws.com/postgres-app:latest
+    port: 8080
+    replicas: 2  # Multiple replicas for high availability
+    resources:
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+    health_check:
+      readiness_probe:
+        path: /health
+        port: 8080
+        initial_delay_seconds: 10
+        period_seconds: 10
+      liveness_probe:
+        path: /health
+        port: 8080
+        initial_delay_seconds: 30
+        period_seconds: 20
+    service:
+      type: LoadBalancer  # For internal service, we'll expose via Ingress
+      port: 80
+    env:
+      - name: DB_HOST
+        value: ${database.host}
+      - name: DB_PORT
+        value: ${database.port}
+      - name: DB_NAME
+        value: postgres_app
+      - name: DB_USER
+        value: ${database.username}
+      - name: DB_PASSWORD
+        value: ${database.password}
+      - name: PORT
+        value: "8080"
+    volume_mounts:
+      - name: app-config
+        mount_path: /app/config
+    volumes:
+      - name: app-config
+        config_map: postgres-app-config
+
+# Ingress configuration for external access
+ingress:
+  enabled: true
+  class_name: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  domain: example.com
+  hosts:
+    - host: postgres-app.example.com
+      paths:
+        - path: /
+          path_type: Prefix
+          service: postgres-app
+          port: 80
+  tls:
+    - hosts:
+        - postgres-app.example.com
+      secret_name: postgres-app-tls
+
+# Additional configuration for the application
+config:
+  log_level: "INFO"
+  enable_metrics: true
+  cors:
+    allowed_origins: ["https://postgres-app.example.com"]
+    allowed_methods: ["GET", "POST", "OPTIONS"] 
